@@ -171,6 +171,7 @@ const Sidebar: React.FC<SidebarProps> = ({
        and the key is what every locale file is already translated against. Same
        divergence as `nav.messages`, which reads "Node Details". */
     navItem('nodes', t('nav.nodes'), 'nodes'),
+    navItem('topology', t('nav.topology', 'Topology'), 'network'),
     ...(hasAnyChannelPermission()
       ? [navItem('channels', t('nav.channels'), 'channels', {
           onClick: onChannelsClick,

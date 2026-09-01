@@ -87,6 +87,7 @@ import LoginPage from './components/LoginPage';
 import { SaveBarProvider, SaveBarGroup } from './contexts/SaveBarContext';
 import { SaveBar } from './components/SaveBar';
 import ErrorBoundary from './components/common/ErrorBoundary';
+import { TopologyView } from './components/Topology';
 
 // Pending favorite/ignored/hide-from-map toggle tracking lives in
 // src/utils/pendingToggles.ts as module-level singletons. Favorite/
@@ -3467,7 +3468,7 @@ function App() {
         )}
 
         {/*
-          Tab region nested Routes (#3962 5.4 PR1). All 15 tabs are now
+          Tab region nested Routes (#3962 5.4 PR1). All source tabs are now
           `<Route>` elements (task54_spec.md §3) — the `path="*"` fallback
           below renders nothing, preserving prior blank-fallback behavior for
           an unrecognized sub-path. `audit` was the PR1 proof leaf; PR3
@@ -3481,6 +3482,10 @@ function App() {
         */}
         <Routes>
           <Route index element={<Navigate to="nodes" replace />} />
+          <Route
+            path="topology"
+            element={<ErrorBoundary fallbackTitle="Topology failed to load"><TopologyView /></ErrorBoundary>}
+          />
           <Route
             path="audit"
             element={<ErrorBoundary fallbackTitle="Audit Log failed to load"><AuditLogTab /></ErrorBoundary>}

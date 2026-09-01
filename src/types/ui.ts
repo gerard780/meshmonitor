@@ -1,5 +1,6 @@
 export type TabType =
   | 'nodes'
+  | 'topology'
   | 'channels'
   | 'messages'
   | 'info'
@@ -26,7 +27,7 @@ export type TabType =
 // UIContext.tsx) so it isn't a non-component named export from a file
 // react-refresh treats as a component module. 'themes' intentionally
 // omitted — see comment above.
-export const VALID_TABS: TabType[] = ['nodes', 'channels', 'messages', 'info', 'settings', 'automation', 'dashboard', 'configuration', 'notifications', 'users', 'audit', 'security', 'admin', 'packetmonitor', 'mqtt-config'];
+export const VALID_TABS: TabType[] = ['nodes', 'topology', 'channels', 'messages', 'info', 'settings', 'automation', 'dashboard', 'configuration', 'notifications', 'users', 'audit', 'security', 'admin', 'packetmonitor', 'mqtt-config'];
 
 export type SortField = 'longName' | 'shortName' | 'id' | 'lastHeard' | 'snr' | 'battery' | 'hwModel' | 'hops' | 'uptime';
 
