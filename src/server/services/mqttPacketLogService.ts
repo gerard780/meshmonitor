@@ -63,13 +63,18 @@ class MqttPacketLogService {
   async runCleanup(): Promise<void> {
     try {
       const maxAgeHours = await this.getMaxAgeHours();
-      const cutoff = Date.now() - maxAgeHours * 60 * 60 * 1000;
-      let removed = await databaseService.mqttPacketLog.deletePacketsOlderThan(cutoff);
+      let removed = 0;
+      if (maxAgeHours > 0) {
+        const cutoff = Date.now() - maxAgeHours * 60 * 60 * 1000;
+        removed = await databaseService.mqttPacketLog.deletePacketsOlderThan(cutoff);
+      }
 
       const maxCount = await this.getMaxCount();
-      const sourceIds = await databaseService.mqttPacketLog.getPacketLogSourceIds();
-      for (const sourceId of sourceIds) {
-        removed += await databaseService.mqttPacketLog.trimPacketsToCount(sourceId, maxCount);
+      if (maxCount > 0) {
+        const sourceIds = await databaseService.mqttPacketLog.getPacketLogSourceIds();
+        for (const sourceId of sourceIds) {
+          removed += await databaseService.mqttPacketLog.trimPacketsToCount(sourceId, maxCount);
+        }
       }
 
       if (removed > 0) {
@@ -126,13 +131,13 @@ class MqttPacketLogService {
   async getMaxCount(): Promise<number> {
     const raw = await databaseService.getSettingAsync('mqtt_packet_log_max_count');
     const n = raw ? parseInt(raw, 10) : NaN;
-    return Number.isFinite(n) && n > 0 ? n : this.DEFAULT_MAX_COUNT;
+    return Number.isFinite(n) && n >= 0 ? n : this.DEFAULT_MAX_COUNT;
   }
 
   async getMaxAgeHours(): Promise<number> {
     const raw = await databaseService.getSettingAsync('mqtt_packet_log_max_age_hours');
     const n = raw ? parseInt(raw, 10) : NaN;
-    return Number.isFinite(n) && n > 0 ? n : this.DEFAULT_MAX_AGE_HOURS;
+    return Number.isFinite(n) && n >= 0 ? n : this.DEFAULT_MAX_AGE_HOURS;
   }
 
   /**

@@ -2941,6 +2941,19 @@ describe('MeshCore Routes', () => {
       );
     });
 
+    it('uses the hard query ceiling when count retention is unlimited', async () => {
+      mockPacketService.getMaxCount.mockResolvedValue(0);
+
+      const response = await authenticatedAgent.get('/api/sources/test-source/meshcore/packets');
+
+      expect(response.status).toBe(200);
+      expect(response.body.maxCount).toBe(0);
+      expect(response.body.limit).toBe(1000);
+      expect(mockPacketService.getPackets).toHaveBeenCalledWith(
+        expect.objectContaining({ limit: 1000 }),
+      );
+    });
+
     it('honors an explicit smaller client-supplied limit', async () => {
       mockPacketService.getMaxCount.mockResolvedValue(500);
 
@@ -2989,6 +3002,17 @@ describe('MeshCore Routes', () => {
       expect(JSON.parse(lines[2])).toMatchObject({ id: 1, payloadType: 2 });
 
       // Exports up to the retention cap, scoped to this source, offset 0.
+      expect(mockPacketService.getPackets).toHaveBeenCalledWith(
+        expect.objectContaining({ sourceId: 'test-source', offset: 0, limit: 1000 }),
+      );
+    });
+
+    it('keeps exports bounded when count retention is unlimited', async () => {
+      mockPacketService.getMaxCount.mockResolvedValue(0);
+
+      const response = await authenticatedAgent.get('/api/sources/test-source/meshcore/packets/export');
+
+      expect(response.status).toBe(200);
       expect(mockPacketService.getPackets).toHaveBeenCalledWith(
         expect.objectContaining({ sourceId: 'test-source', offset: 0, limit: 1000 }),
       );

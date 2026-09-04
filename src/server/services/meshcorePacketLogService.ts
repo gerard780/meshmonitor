@@ -46,8 +46,11 @@ class MeshCorePacketLogService {
   async runCleanup(): Promise<void> {
     try {
       const maxAgeHours = await this.getMaxAgeHours();
-      const cutoff = Date.now() - maxAgeHours * 60 * 60 * 1000;
-      let removed = await databaseService.meshcore.deletePacketsOlderThan(cutoff);
+      let removed = 0;
+      if (maxAgeHours > 0) {
+        const cutoff = Date.now() - maxAgeHours * 60 * 60 * 1000;
+        removed = await databaseService.meshcore.deletePacketsOlderThan(cutoff);
+      }
 
       // Row caps are applied PER SOURCE, and the two source kinds have very
       // different volume profiles: a device-backed source logs its own radio's
@@ -65,7 +68,9 @@ class MeshCorePacketLogService {
       const sourceIds = await databaseService.meshcore.getPacketLogSourceIds();
       for (const sourceId of sourceIds) {
         const cap = ingestSourceIds.has(sourceId) ? ingestMaxCount : deviceMaxCount;
-        removed += await databaseService.meshcore.trimPacketsToCount(sourceId, cap);
+        if (cap > 0) {
+          removed += await databaseService.meshcore.trimPacketsToCount(sourceId, cap);
+        }
       }
 
       if (removed > 0) {
@@ -128,20 +133,20 @@ class MeshCorePacketLogService {
   async getMaxCount(): Promise<number> {
     const raw = await databaseService.getSettingAsync('meshcore_packet_log_max_count');
     const n = raw ? parseInt(raw, 10) : NaN;
-    return Number.isFinite(n) && n > 0 ? n : this.DEFAULT_MAX_COUNT;
+    return Number.isFinite(n) && n >= 0 ? n : this.DEFAULT_MAX_COUNT;
   }
 
   /** Row cap for meshcore_mqtt ingest sources; see DEFAULT_INGEST_MAX_COUNT. */
   async getIngestMaxCount(): Promise<number> {
     const raw = await databaseService.getSettingAsync('meshcore_mqtt_packet_log_max_count');
     const n = raw ? parseInt(raw, 10) : NaN;
-    return Number.isFinite(n) && n > 0 ? n : this.DEFAULT_INGEST_MAX_COUNT;
+    return Number.isFinite(n) && n >= 0 ? n : this.DEFAULT_INGEST_MAX_COUNT;
   }
 
   async getMaxAgeHours(): Promise<number> {
     const raw = await databaseService.getSettingAsync('meshcore_packet_log_max_age_hours');
     const n = raw ? parseInt(raw, 10) : NaN;
-    return Number.isFinite(n) && n > 0 ? n : this.DEFAULT_MAX_AGE_HOURS;
+    return Number.isFinite(n) && n >= 0 ? n : this.DEFAULT_MAX_AGE_HOURS;
   }
 
   stop(): void {

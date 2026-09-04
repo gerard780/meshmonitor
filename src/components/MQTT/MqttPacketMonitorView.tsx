@@ -452,10 +452,10 @@ export const MqttPacketMonitorView: React.FC<MqttPacketMonitorViewProps> = ({ ba
                 {t('mqtt.packets.captureEnabled', 'Capture enabled')}
               </label>
               <label>
-                {t('mqtt.packets.maxCount', 'Max count')}
+                {t('mqtt.packets.maxCount', 'Max count (0 = unlimited)')}
                 <input
                   type="number"
-                  min={100}
+                  min={0}
                   max={50000}
                   step={100}
                   value={maxCount}
@@ -464,10 +464,10 @@ export const MqttPacketMonitorView: React.FC<MqttPacketMonitorViewProps> = ({ ba
                 />
               </label>
               <label>
-                {t('mqtt.packets.maxAgeHours', 'Max age (h)')}
+                {t('mqtt.packets.maxAgeHours', 'Max age (h, 0 = unlimited)')}
                 <input
                   type="number"
-                  min={1}
+                  min={0}
                   max={720}
                   value={maxAgeHours}
                   onChange={e => setMaxAgeHours(Number(e.target.value))}

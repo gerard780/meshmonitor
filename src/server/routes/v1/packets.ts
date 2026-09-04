@@ -21,6 +21,7 @@ function getScopedSourceId(req: Request): string | undefined {
 }
 
 const router = express.Router({ mergeParams: true });
+const PACKET_QUERY_MAX_LIMIT = 10000;
 
 /**
  * GET /api/v1/packets
@@ -32,7 +33,10 @@ router.get('/', async (req, res) => {
     let limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
 
     // Enforce maximum limit to prevent unbounded queries
-    const MAX_LIMIT = await packetLogService.getMaxCount();
+    const retentionMaxCount = await packetLogService.getMaxCount();
+    const MAX_LIMIT = retentionMaxCount > 0
+      ? Math.min(retentionMaxCount, PACKET_QUERY_MAX_LIMIT)
+      : PACKET_QUERY_MAX_LIMIT;
     if (limit > MAX_LIMIT) {
       limit = MAX_LIMIT;
     }

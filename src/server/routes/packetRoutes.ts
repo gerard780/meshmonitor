@@ -12,6 +12,7 @@ function normalizeSinceToMs(value: string): number {
 }
 
 const router = express.Router();
+const PACKET_QUERY_MAX_LIMIT = 10000;
 
 /**
  * Permission middleware - require packetmonitor:read permission
@@ -87,8 +88,11 @@ router.get('/', requirePacketPermissions, async (req, res) => {
     let limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
 
     // Enforce maximum limit to prevent unbounded queries
-    // Use the configured max count from settings (defaults to 1000)
-    const MAX_LIMIT = await packetLogService.getMaxCount();
+    // A zero retention count is unlimited storage, not an unbounded response.
+    const retentionMaxCount = await packetLogService.getMaxCount();
+    const MAX_LIMIT = retentionMaxCount > 0
+      ? Math.min(retentionMaxCount, PACKET_QUERY_MAX_LIMIT)
+      : PACKET_QUERY_MAX_LIMIT;
     if (limit > MAX_LIMIT) {
       limit = MAX_LIMIT;
     }
@@ -268,11 +272,14 @@ router.get('/export', requirePacketPermissions, async (req, res) => {
     const canReadMessages = (req as any).canReadMessages as boolean;
     const sourceId = (req as any).scopedSourceId as string | undefined;
 
-    // Fetch all matching packets (up to configured max)
-    const maxCount = await packetLogService.getMaxCount();
+    // Fetch matching packets up to the retention cap or the hard query cap.
+    const retentionMaxCount = await packetLogService.getMaxCount();
+    const exportLimit = retentionMaxCount > 0
+      ? Math.min(retentionMaxCount, PACKET_QUERY_MAX_LIMIT)
+      : PACKET_QUERY_MAX_LIMIT;
     const rawPackets = await packetLogService.getPacketsAsync({
       offset: 0,
-      limit: maxCount,
+      limit: exportLimit,
       portnum,
       from_node,
       to_node,
