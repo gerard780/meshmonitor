@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { getEffectivePosition, getRoleName, getHardwareModelName, getNodeName, getNodeShortName, formatSenderLabel, hasValidEffectivePosition, isNodeComplete, resolveMapEndpoint, formatLocationSource, parseNodeNumInput } from './nodeHelpers';
+import { getEffectivePosition, getRoleName, getHardwareModelName, getNodeName, getNodeShortName, formatSenderLabel, hasValidEffectivePosition, isNodeComplete, resolveMapEndpoint, formatLocationSource, parseNodeNumInput, resolveMeshtasticNodeNames } from './nodeHelpers';
 import { setDiscardInvalidPositionsDisplay } from './positionDisplayConfig';
 import { ROLE_NAMES, HARDWARE_MODELS } from '../constants/index.js';
 import type { DeviceInfo } from '../types/device';
@@ -46,6 +46,29 @@ describe('resolveMapEndpoint (#3642)', () => {
 });
 
 describe('Node Helpers', () => {
+  describe('resolveMeshtasticNodeNames', () => {
+    it('mirrors stock firmware names when both names are missing', () => {
+      expect(resolveMeshtasticNodeNames(0x9e9d0858, null, null)).toEqual({
+        longName: 'Meshtastic 0858',
+        shortName: '0858',
+      });
+    });
+
+    it('uses an advertised short name in the generated long name', () => {
+      expect(resolveMeshtasticNodeNames(0x9e9d0858, undefined, 'MESH')).toEqual({
+        longName: 'Meshtastic MESH',
+        shortName: 'MESH',
+      });
+    });
+
+    it('preserves advertised names', () => {
+      expect(resolveMeshtasticNodeNames(0x9e9d0858, 'Hilltop', 'HILL')).toEqual({
+        longName: 'Hilltop',
+        shortName: 'HILL',
+      });
+    });
+  });
+
   describe('getRoleName', () => {
     it('should return correct role names for all valid roles', () => {
       expect(getRoleName(0)).toBe('Client');

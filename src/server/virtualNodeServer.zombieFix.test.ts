@@ -287,6 +287,30 @@ describe('VirtualNodeServer.sendNodeInfosFromDb — issue #2602 zombie filtering
     }));
   });
 
+  it('uses firmware-style names when a database node has no User names', async () => {
+    getActiveNodesMock.mockResolvedValue([{
+      nodeNum: 0x9e9d0858,
+      nodeId: '!9e9d0858',
+      longName: null,
+      shortName: null,
+      hwModel: null,
+      lastHeard: Math.floor(Date.now() / 1000),
+    }]);
+
+    const vn = new VirtualNodeServer({ port: 4503, meshtasticManager: makeFakeManager() });
+    attachFakeClient(vn);
+
+    await (vn as any).sendNodeInfosFromDb('client-1');
+
+    expect(createNodeInfoMock).toHaveBeenCalledWith(expect.objectContaining({
+      nodeNum: 0x9e9d0858,
+      user: expect.objectContaining({
+        longName: 'Meshtastic 0858',
+        shortName: '0858',
+      }),
+    }));
+  });
+
   it('falls back to default 24h when maxNodeAgeHours setting is unset', async () => {
     getActiveNodesMock.mockResolvedValue([]);
     getSettingForSourceMock.mockResolvedValue(null);

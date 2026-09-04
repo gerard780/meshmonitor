@@ -64,7 +64,7 @@ import { hopCountEmoji, HOP_COUNT_EMOJIS } from '../utils/hopEmoji.js';
 import { scriptDependencyEnv } from './utils/scriptRunner.js';
 import { canonicalMessageTime, plausibleRxTime } from './utils/messageTime.js';
 import { canonicalTelemetryType, canonicalTelemetryUnit } from './utils/telemetryKeys.js';
-import { isNodeComplete } from '../utils/nodeHelpers.js';
+import { isNodeComplete, resolveMeshtasticNodeNames } from '../utils/nodeHelpers.js';
 import { getEffectiveDbNodePosition } from './utils/nodeEnhancer.js';
 import { migrateAutomationChannels } from './utils/automationChannelMigration.js';
 import { detectChannelMoves } from './utils/channelMoveDetection.js';
@@ -4841,11 +4841,12 @@ class MeshtasticManager implements ISourceManager {
         // lookup may return a stale row whose firmwareVersion is NULL.
         const node = await databaseService.nodes.getNode(nodeNum, this.sourceId);
         if (node) {
+          const names = resolveMeshtasticNodeNames(nodeNum, node.longName, node.shortName);
           this.localNodeInfo = {
             nodeNum: nodeNum,
             nodeId: savedNodeId,
-            longName: node.longName || 'Unknown',
-            shortName: node.shortName || 'UNK',
+            longName: names.longName,
+            shortName: names.shortName,
             hwModel: node.hwModel || undefined,
             firmwareVersion: (node as any).firmwareVersion || null,
             rebootCount: (node as any).rebootCount !== undefined ? (node as any).rebootCount : undefined,
@@ -4854,11 +4855,12 @@ class MeshtasticManager implements ISourceManager {
           logger.debug(`✅ Restored local node info from settings: ${savedNodeId}, rebootCount: ${(node as any).rebootCount}`);
         } else {
           // Create minimal local node info
+          const names = resolveMeshtasticNodeNames(nodeNum, null, null);
           this.localNodeInfo = {
             nodeNum: nodeNum,
             nodeId: savedNodeId,
-            longName: 'Unknown',
-            shortName: 'UNK',
+            longName: names.longName,
+            shortName: names.shortName,
             isLocked: false
           } as any;
           logger.debug(`✅ Restored minimal local node info from settings: ${savedNodeId}`);
@@ -6487,12 +6489,13 @@ class MeshtasticManager implements ISourceManager {
       // mesh sees the same coordinates the user has asserted as authoritative
       // (issue #2847).
       const effPos = getEffectiveDbNodePosition(node);
+      const names = resolveMeshtasticNodeNames(node.nodeNum, node.longName, node.shortName);
       const nodeInfoMessage = await meshtasticProtobufService.createNodeInfo({
         nodeNum: node.nodeNum,
         user: {
           id: node.nodeId,
-          longName: node.longName || 'Unknown',
-          shortName: node.shortName || '????',
+          longName: names.longName,
+          shortName: names.shortName,
           hwModel: node.hwModel || 0,
           role: node.role ?? undefined,
           publicKey: node.publicKey ?? undefined,
