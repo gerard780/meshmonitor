@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Changed
+- **Unlimited packet and maintenance retention** — packet count/age limits and database-maintenance retention fields now accept `0` to disable that cleanup criterion while keeping API query and export safety caps bounded.
+
 ## [4.15.2-rc2] - 2026-08-22
 
 ### Added

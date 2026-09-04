@@ -208,6 +208,11 @@ export class PacketLogRepository extends BaseRepository {
    * Enforce max count limit on packet logs (deletes oldest entries)
    */
   async enforcePacketLogMaxCount(maxCount: number): Promise<void> {
+    // A zero limit disables count-based retention. Keep this guard at the
+    // repository boundary as well as in the service so no direct caller can
+    // accidentally interpret "unlimited" as "delete everything".
+    if (maxCount <= 0) return;
+
     try {
       const { packetLog } = this.tables;
       const countResult = await this.db
@@ -405,6 +410,9 @@ export class PacketLogRepository extends BaseRepository {
    * Cleanup old packet logs based on max age
    */
   async cleanupOldPacketLogs(maxAgeHours: number): Promise<number> {
+    // Zero disables age-based retention.
+    if (maxAgeHours <= 0) return 0;
+
     const cutoffTimestamp = Date.now() - (maxAgeHours * 60 * 60 * 1000);
 
     try {

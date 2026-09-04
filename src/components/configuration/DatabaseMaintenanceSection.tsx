@@ -362,8 +362,8 @@ const DatabaseMaintenanceSection: React.FC = () => {
                   <input
                     type="number"
                     value={messageRetentionDays}
-                    onChange={(e) => setMessageRetentionDays(parseInt(e.target.value) || 30)}
-                    min="7"
+                    onChange={(e) => setMessageRetentionDays(Number(e.target.value))}
+                    min="0"
                     max="365"
                     style={{
                       padding: '0.5rem',
@@ -385,8 +385,8 @@ const DatabaseMaintenanceSection: React.FC = () => {
                   <input
                     type="number"
                     value={tracerouteRetentionDays}
-                    onChange={(e) => setTracerouteRetentionDays(parseInt(e.target.value) || 30)}
-                    min="7"
+                    onChange={(e) => setTracerouteRetentionDays(Number(e.target.value))}
+                    min="0"
                     max="365"
                     style={{
                       padding: '0.5rem',
@@ -408,8 +408,8 @@ const DatabaseMaintenanceSection: React.FC = () => {
                   <input
                     type="number"
                     value={routeSegmentRetentionDays}
-                    onChange={(e) => setRouteSegmentRetentionDays(parseInt(e.target.value) || 30)}
-                    min="7"
+                    onChange={(e) => setRouteSegmentRetentionDays(Number(e.target.value))}
+                    min="0"
                     max="365"
                     style={{
                       padding: '0.5rem',
@@ -431,8 +431,8 @@ const DatabaseMaintenanceSection: React.FC = () => {
                   <input
                     type="number"
                     value={neighborInfoRetentionDays}
-                    onChange={(e) => setNeighborInfoRetentionDays(parseInt(e.target.value) || 30)}
-                    min="7"
+                    onChange={(e) => setNeighborInfoRetentionDays(Number(e.target.value))}
+                    min="0"
                     max="365"
                     style={{
                       padding: '0.5rem',

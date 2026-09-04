@@ -33,6 +33,14 @@ describe('PacketLogService', () => {
     it('should return correct max age hours', async () => {
       expect(await packetLogService.getMaxAgeHours()).toBeGreaterThan(0);
     });
+
+    it('should preserve zero as unlimited for both retention settings', async () => {
+      databaseService.setSetting('packet_log_max_count', '0');
+      databaseService.setSetting('packet_log_max_age_hours', '0');
+
+      expect(await packetLogService.getMaxCount()).toBe(0);
+      expect(await packetLogService.getMaxAgeHours()).toBe(0);
+    });
   });
 
   describe('Packet Logging', () => {
@@ -313,6 +321,35 @@ describe('PacketLogService', () => {
   });
 
   describe('Packet Cleanup', () => {
+    it('should retain packets when both retention limits are zero', async () => {
+      databaseService.setSetting('packet_log_enabled', '1');
+      databaseService.setSetting('packet_log_max_count', '0');
+      databaseService.setSetting('packet_log_max_age_hours', '0');
+
+      await packetLogService.logPacket({
+        packet_id: 101,
+        timestamp: Date.now() - (365 * 24 * 60 * 60 * 1000),
+        from_node: 111,
+        channel: 0,
+        portnum: 1,
+        encrypted: false,
+        metadata: '{}'
+      });
+      await packetLogService.logPacket({
+        packet_id: 102,
+        timestamp: Date.now(),
+        from_node: 111,
+        channel: 0,
+        portnum: 1,
+        encrypted: false,
+        metadata: '{}'
+      });
+
+      expect(await packetLogService.getPacketCount()).toBe(2);
+      expect(await databaseService.cleanupOldPacketLogsAsync()).toBe(0);
+      expect(await packetLogService.getPacketCount()).toBe(2);
+    });
+
     it('should clear all packets', async () => {
       databaseService.setSetting('packet_log_enabled', '1');
 

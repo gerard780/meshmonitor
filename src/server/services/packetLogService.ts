@@ -164,16 +164,18 @@ class PacketLogService {
    * Get max packet count setting
    */
   async getMaxCount(): Promise<number> {
-    const maxCountStr = await databaseService.getSettingAsync('packet_log_max_count');
-    return maxCountStr ? parseInt(maxCountStr, 10) : 1000;
+    const raw = await databaseService.getSettingAsync('packet_log_max_count');
+    const value = raw !== null ? parseInt(raw, 10) : NaN;
+    return Number.isFinite(value) && value >= 0 ? value : 1000;
   }
 
   /**
    * Get max age in hours setting
    */
   async getMaxAgeHours(): Promise<number> {
-    const maxAgeStr = await databaseService.getSettingAsync('packet_log_max_age_hours');
-    return maxAgeStr ? parseInt(maxAgeStr, 10) : 24;
+    const raw = await databaseService.getSettingAsync('packet_log_max_age_hours');
+    const value = raw !== null ? parseInt(raw, 10) : NaN;
+    return Number.isFinite(value) && value >= 0 ? value : 24;
   }
 
   /**

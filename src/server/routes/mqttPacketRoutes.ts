@@ -57,7 +57,9 @@ router.get(
 
       const maxCount = await mqttPacketLogService.getMaxCount();
       const requestedLimit = parseInt(req.query.limit as string, 10);
-      const effectiveLimit = Number.isFinite(requestedLimit) && requestedLimit > 0 ? requestedLimit : maxCount;
+      const effectiveLimit = Number.isFinite(requestedLimit) && requestedLimit > 0
+        ? requestedLimit
+        : (maxCount > 0 ? maxCount : MQTT_PACKET_MAX_LIMIT);
       const limit = Math.min(Math.max(effectiveLimit, 1), MQTT_PACKET_MAX_LIMIT);
 
       const gatewaysRaw = typeof req.query.gateways === 'string' ? req.query.gateways : undefined;

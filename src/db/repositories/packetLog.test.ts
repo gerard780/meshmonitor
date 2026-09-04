@@ -326,10 +326,15 @@ describe('PacketLogRepository - Packet Log Queries', () => {
       expect(await repo.getPacketLogCount()).toBe(3);
     });
 
-    it('handles a maxCount of 0 by deleting every row', async () => {
+    it('treats a maxCount of 0 as unlimited', async () => {
       await repo.enforcePacketLogMaxCount(0);
-      expect(await repo.getPacketLogCount()).toBe(0);
+      expect(await repo.getPacketLogCount()).toBe(3);
     });
+  });
+
+  it('treats a max age of 0 as unlimited', async () => {
+    expect(await repo.cleanupOldPacketLogs(0)).toBe(0);
+    expect(await repo.getPacketLogCount()).toBe(3);
   });
 
   // PR-B security fix — retroactive-decrypt per-source ACL pre-flight.

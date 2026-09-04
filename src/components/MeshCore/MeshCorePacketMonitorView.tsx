@@ -369,10 +369,10 @@ export const MeshCorePacketMonitorView: React.FC<MeshCorePacketMonitorViewProps>
                 {t('meshcore.packets.captureEnabled', 'Capture enabled')}
               </label>
               <label>
-                {t('meshcore.packets.maxCount', 'Max count')}
+                {t('meshcore.packets.maxCount', 'Max count (0 = unlimited)')}
                 <input
                   type="number"
-                  min={100}
+                  min={0}
                   max={isIngestSource ? 500000 : 50000}
                   step={100}
                   value={maxCount}
@@ -397,10 +397,10 @@ export const MeshCorePacketMonitorView: React.FC<MeshCorePacketMonitorViewProps>
                 </span>
               )}
               <label>
-                {t('meshcore.packets.maxAgeHours', 'Max age (h)')}
+                {t('meshcore.packets.maxAgeHours', 'Max age (h, 0 = unlimited)')}
                 <input
                   type="number"
-                  min={1}
+                  min={0}
                   max={720}
                   value={maxAgeHours}
                   onChange={e => setMaxAgeHours(Number(e.target.value))}

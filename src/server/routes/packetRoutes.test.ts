@@ -369,6 +369,19 @@ describe('Packet Routes', () => {
       expect(response.body.maxCount).toBe(1000);
     });
 
+    it('uses the hard query cap when packet retention is unlimited', async () => {
+      (DatabaseService as any).setSetting('packet_log_max_count', '0');
+
+      const response = await request(app)
+        .get('/api/packets?limit=100')
+        .set('Authorization', 'Bearer regular')
+        .expect(200);
+
+      expect(response.body.packets.length).toBe(2);
+      expect(response.body.limit).toBe(100);
+      expect(response.body.maxCount).toBe(0);
+    });
+
     it('should deny access without permissions', async () => {
       await request(app)
         .get('/api/packets')
