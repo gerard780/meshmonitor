@@ -28,8 +28,9 @@ import type { Mock } from 'vitest';
 // databaseService.settings.getSettingForSource, not the old global
 // databaseService.getSettingAsync. getSettingForSourceMock is keyed on
 // (sourceId, key) so per-source cases can differ from the default.
-const { getActiveNodesMock, getSettingForSourceMock } = vi.hoisted(() => ({
+const { getActiveNodesMock, getNodeMock, getSettingForSourceMock } = vi.hoisted(() => ({
   getActiveNodesMock: vi.fn().mockResolvedValue([]),
+  getNodeMock: vi.fn().mockResolvedValue(null),
   getSettingForSourceMock: vi.fn().mockResolvedValue('24'),
 }));
 
@@ -37,6 +38,7 @@ vi.mock('../services/database.js', () => {
   const shared = {
     nodes: {
       getActiveNodes: getActiveNodesMock,
+      getNode: getNodeMock,
       setNodeFavorite: vi.fn().mockResolvedValue(undefined),
     },
     settings: {
@@ -142,6 +144,8 @@ function attachFakeClient(vn: VirtualNodeServer, clientId: string = 'client-1') 
 describe('VirtualNodeServer.sendNodeInfosFromDb — issue #2602 zombie filtering', () => {
   beforeEach(() => {
     getActiveNodesMock.mockReset();
+    getNodeMock.mockReset();
+    getNodeMock.mockResolvedValue(null);
     getSettingForSourceMock.mockReset();
     createNodeInfoMock.mockReset();
     createNodeInfoMock.mockResolvedValue(new Uint8Array([10, 20, 30]));
@@ -228,6 +232,59 @@ describe('VirtualNodeServer.sendNodeInfosFromDb — issue #2602 zombie filtering
     expect(sourceId).toBe('src-multi-A');
     // maxNodeAgeHours must be read for THIS manager's source, not globally.
     expect(getSettingForSourceMock).toHaveBeenCalledWith('src-multi-A', 'maxNodeAgeHours');
+  });
+
+  it('can exclude OwnNodeInfo from the later OtherNodeInfos list', async () => {
+    getActiveNodesMock.mockResolvedValue([
+      {
+        nodeNum: 0x11223344,
+        nodeId: '!11223344',
+        longName: 'Local node',
+        shortName: 'LOCAL',
+        hwModel: 1,
+      },
+      {
+        nodeNum: 0x55667788,
+        nodeId: '!55667788',
+        longName: 'Remote node',
+        shortName: 'REMOTE',
+        hwModel: 1,
+      },
+    ]);
+
+    const vn = new VirtualNodeServer({ port: 4503, meshtasticManager: makeFakeManager() });
+    attachFakeClient(vn);
+
+    const result = await (vn as any).sendNodeInfosFromDb('client-1', 0x11223344);
+
+    expect(result).toEqual({ sent: 1, disconnected: false });
+    expect(createNodeInfoMock).toHaveBeenCalledTimes(1);
+    expect(createNodeInfoMock.mock.calls[0][0]).toEqual(expect.objectContaining({ nodeNum: 0x55667788 }));
+  });
+
+  it('sends the local node name in the dedicated OwnNodeInfo slot', async () => {
+    getNodeMock.mockResolvedValue({
+      nodeNum: 0x11223344,
+      nodeId: '!11223344',
+      longName: 'Local node name',
+      shortName: 'LOCAL',
+      hwModel: 1,
+    });
+
+    const vn = new VirtualNodeServer({
+      port: 4503,
+      meshtasticManager: makeFakeManager('src-owner', 0x11223344),
+    });
+    attachFakeClient(vn);
+
+    const sent = await (vn as any).sendOwnNodeInfoFromDb('client-1');
+
+    expect(sent).toBe(true);
+    expect(getNodeMock).toHaveBeenCalledWith(0x11223344, 'src-owner');
+    expect(createNodeInfoMock).toHaveBeenCalledWith(expect.objectContaining({
+      nodeNum: 0x11223344,
+      user: expect.objectContaining({ longName: 'Local node name', shortName: 'LOCAL' }),
+    }));
   });
 
   it('falls back to default 24h when maxNodeAgeHours setting is unset', async () => {

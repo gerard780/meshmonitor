@@ -9,6 +9,7 @@ import databaseService from '../services/database.js';
 import { getEffectiveDbNodePosition } from './utils/nodeEnhancer.js';
 import { MODEM_PRESET_CHANNEL_NAMES } from '../utils/loraFrequency.js';
 import { getMaxNodeAgeHours } from './services/nodeDisplaySettings.js';
+import type { DbNode } from '../db/types.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../../package.json');
@@ -820,7 +821,75 @@ export class VirtualNodeServer extends EventEmitter {
    * multi-source MeshMonitor doesn't bleed nodes from one source into another
    * source's virtual node clients.
    */
-  private async sendNodeInfosFromDb(clientId: string): Promise<{ sent: number; disconnected: boolean }> {
+  private async createNodeInfoFromDbNode(node: DbNode): Promise<Uint8Array | null> {
+    // Surface the effective position (override if enabled) so virtual node
+    // clients see the user-set custom location instead of stale device GPS
+    // (issue #2847).
+    const effPos = getEffectiveDbNodePosition(node);
+    return meshtasticProtobufService.createNodeInfo({
+      nodeNum: node.nodeNum,
+      user: {
+        id: node.nodeId,
+        longName: node.longName || 'Unknown',
+        shortName: node.shortName || '????',
+        hwModel: node.hwModel || 0,
+        role: node.role ?? undefined,
+        publicKey: node.publicKey ?? undefined,
+      },
+      position: (effPos.latitude != null && effPos.longitude != null) ? {
+        latitude: effPos.latitude,
+        longitude: effPos.longitude,
+        altitude: effPos.altitude ?? 0,
+        time: node.lastHeard || Math.floor(Date.now() / 1000),
+      } : undefined,
+      deviceMetrics: (node.batteryLevel != null || node.voltage != null ||
+                     node.channelUtilization != null || node.airUtilTx != null) ? {
+        batteryLevel: node.batteryLevel ?? undefined,
+        voltage: node.voltage ?? undefined,
+        channelUtilization: node.channelUtilization ?? undefined,
+        airUtilTx: node.airUtilTx ?? undefined,
+      } : undefined,
+      snr: node.snr ?? undefined,
+      lastHeard: node.lastHeard ?? undefined,
+      hopsAway: node.hopsAway ?? undefined,
+      viaMqtt: node.viaMqtt ? true : false,
+      isFavorite: node.isFavorite ? true : false,
+    });
+  }
+
+  /**
+   * Firmware sends the local node's full NodeInfo immediately after MyNodeInfo.
+   * Clients use this "OwnNodeInfo" slot to attach the owner name to myNodeNum.
+   * It must be present even for NONCE_ONLY_CONFIG (69420), which skips only the
+   * later OtherNodeInfos list.
+   */
+  private async sendOwnNodeInfoFromDb(clientId: string): Promise<boolean> {
+    const localNodeInfo = this.config.meshtasticManager.getLocalNodeInfo();
+    if (!localNodeInfo) {
+      logger.warn('Virtual node: No local node info available, skipping OwnNodeInfo');
+      return false;
+    }
+
+    const sourceId = this.config.meshtasticManager.sourceId;
+    const localNode = await databaseService.nodes.getNode(localNodeInfo.nodeNum, sourceId) as DbNode | null;
+    const message = localNode
+      ? await this.createNodeInfoFromDbNode(localNode)
+      : await meshtasticProtobufService.createNodeInfo({
+          nodeNum: localNodeInfo.nodeNum,
+          user: {
+            id: localNodeInfo.nodeId,
+            longName: localNodeInfo.longName || 'Unknown',
+            shortName: localNodeInfo.shortName || '????',
+            hwModel: localNodeInfo.hwModel || 0,
+          },
+        });
+
+    if (!message) return false;
+    await this.sendToClient(clientId, message);
+    return true;
+  }
+
+  private async sendNodeInfosFromDb(clientId: string, excludeNodeNum?: number): Promise<{ sent: number; disconnected: boolean }> {
     const sourceId = this.config.meshtasticManager.sourceId;
     const maxNodeAgeHours = await getMaxNodeAgeHours(databaseService.settings, sourceId);
     const maxNodeAgeDays = maxNodeAgeHours / 24;
@@ -838,45 +907,18 @@ export class VirtualNodeServer extends EventEmitter {
       if (node.nodeNum === BROADCAST_NODE_NUM || node.nodeId === '!ffffffff') {
         continue;
       }
+      // OwnNodeInfo is sent in its firmware-required position immediately
+      // after MyNodeInfo. Do not duplicate it in OtherNodeInfos.
+      if (node.nodeNum === excludeNodeNum) {
+        continue;
+      }
 
       const client = this.clients.get(clientId);
       if (!client || client.socket.destroyed) {
         return { sent, disconnected: true };
       }
 
-      // Surface the effective position (override if enabled) so virtual node
-      // clients see the user-set custom location instead of stale device GPS
-      // (issue #2847).
-      const effPos = getEffectiveDbNodePosition(node);
-      const nodeInfoMessage = await meshtasticProtobufService.createNodeInfo({
-        nodeNum: node.nodeNum,
-        user: {
-          id: node.nodeId,
-          longName: node.longName || 'Unknown',
-          shortName: node.shortName || '????',
-          hwModel: node.hwModel || 0,
-          role: node.role ?? undefined,
-          publicKey: node.publicKey ?? undefined,
-        },
-        position: (effPos.latitude != null && effPos.longitude != null) ? {
-          latitude: effPos.latitude,
-          longitude: effPos.longitude,
-          altitude: effPos.altitude ?? 0,
-          time: node.lastHeard || Math.floor(Date.now() / 1000),
-        } : undefined,
-        deviceMetrics: (node.batteryLevel != null || node.voltage != null ||
-                       node.channelUtilization != null || node.airUtilTx != null) ? {
-          batteryLevel: node.batteryLevel ?? undefined,
-          voltage: node.voltage ?? undefined,
-          channelUtilization: node.channelUtilization ?? undefined,
-          airUtilTx: node.airUtilTx ?? undefined,
-        } : undefined,
-        snr: node.snr ?? undefined,
-        lastHeard: node.lastHeard ?? undefined,
-        hopsAway: node.hopsAway ?? undefined,
-        viaMqtt: node.viaMqtt ? true : false,
-        isFavorite: node.isFavorite ? true : false,
-      });
+      const nodeInfoMessage = await this.createNodeInfoFromDbNode(node);
 
       if (nodeInfoMessage) {
         await this.sendToClient(clientId, nodeInfoMessage);
@@ -949,8 +991,9 @@ export class VirtualNodeServer extends EventEmitter {
       }
 
       // === CONFIG REPLAY (69420 or full/random) ===
-      // Matches firmware order: MyNodeInfo → Metadata → Channels → Config → ModuleConfig
-      //   → OtherNodeInfos (only for full/random, skipped for 69420) → ConfigComplete
+      // Matches firmware order: MyNodeInfo → OwnNodeInfo → Metadata → Channels
+      //   → Config → ModuleConfig → OtherNodeInfos (only for full/random,
+      //   skipped for 69420) → ConfigComplete
 
       // --- STEP 1: MyNodeInfo (rebuilt from DB) ---
       const localNodeInfo = this.config.meshtasticManager.getLocalNodeInfo();
@@ -988,7 +1031,16 @@ export class VirtualNodeServer extends EventEmitter {
         logger.warn(`Virtual node: No local node info available, skipping MyNodeInfo`);
       }
 
-      // --- STEP 2: Metadata (from cache, with firmware version rewrite) ---
+      // --- STEP 2: OwnNodeInfo (rebuilt from DB) ---
+      // This is a distinct mandatory slot in PhoneAPI.cpp, not part of the
+      // optional OtherNodeInfos list. In particular, config-only nonce 69420
+      // still needs it or clients know myNodeNum but have no owner/name.
+      if (await this.sendOwnNodeInfoFromDb(clientId)) {
+        sentCount++;
+        logger.debug('Virtual node: ✓ Sent OwnNodeInfo');
+      }
+
+      // --- STEP 3: Metadata (from cache, with firmware version rewrite) ---
       for (const message of cachedMessages) {
         if (message.type !== 'metadata') continue;
 
@@ -1007,7 +1059,7 @@ export class VirtualNodeServer extends EventEmitter {
         logger.debug(`Virtual node: ✓ Sent metadata`);
       }
 
-      // --- STEP 3: Channels (rebuilt from DB) ---
+      // --- STEP 4: Channels (rebuilt from DB) ---
       const channelResult = await this.sendChannelsFromDb(clientId);
       sentCount += channelResult.sent;
       if (channelResult.disconnected) {
@@ -1016,7 +1068,7 @@ export class VirtualNodeServer extends EventEmitter {
       }
       logger.debug(`Virtual node: ✓ Sent ${channelResult.sent} channels from database`);
 
-      // --- STEP 4: Config + ModuleConfig (from cache) ---
+      // --- STEPS 5-6: Config + ModuleConfig (from cache) ---
       let staticCount = 0;
       for (const message of cachedMessages) {
         if (message.type === 'myInfo' || message.type === 'nodeInfo' ||
@@ -1037,9 +1089,9 @@ export class VirtualNodeServer extends EventEmitter {
       }
       logger.debug(`Virtual node: ✓ Sent ${staticCount} cached static messages (config, moduleConfig)`);
 
-      // --- STEP 5: OtherNodeInfos (only for full/random, skipped for 69420) ---
+      // --- STEP 7: OtherNodeInfos (only for full/random, skipped for 69420) ---
       if (!isConfigOnly) {
-        const nodeResult = await this.sendNodeInfosFromDb(clientId);
+        const nodeResult = await this.sendNodeInfosFromDb(clientId, localNodeInfo?.nodeNum);
         sentCount += nodeResult.sent;
         if (nodeResult.disconnected) {
           logger.warn(`Virtual node: Client ${clientId} disconnected during NodeInfo send`);
@@ -1048,7 +1100,7 @@ export class VirtualNodeServer extends EventEmitter {
         logger.debug(`Virtual node: ✓ Sent ${nodeResult.sent} NodeInfo entries from database`);
       }
 
-      // --- STEP 6: ConfigComplete ---
+      // --- STEP 8: ConfigComplete ---
       const useConfigId = configId || 1;
       const configComplete = await meshtasticProtobufService.createConfigComplete(useConfigId);
       if (configComplete) {
