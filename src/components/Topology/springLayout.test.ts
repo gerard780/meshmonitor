@@ -6,10 +6,12 @@ const graphNodes: TopologyGraphNode[] = [
   {
     id: '!00000064', nodeNum: 100, label: 'Base', shortName: 'BASE', viaMqtt: false,
     isLocal: true, isPlaceholder: false, degree: 1,
+    isAnchor: false,
   },
   {
     id: '!000000c8', nodeNum: 200, label: 'Hill', shortName: 'HILL', viaMqtt: false,
     isLocal: false, isPlaceholder: false, degree: 1,
+    isAnchor: false,
   },
 ];
 

@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type WheelEvent as ReactWheelEvent,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { useData } from '../../contexts/DataContext';
 import { useMapContext } from '../../contexts/MapContext';
@@ -12,15 +20,25 @@ import {
 } from './springLayout';
 import {
   buildTopologyGraph,
+  type TopologyEdgeKind,
   type TopologyGraphEdge,
   type TopologyGraphNode,
   type TopologyWindowHours,
 } from './topologyGraph';
 import './TopologyView.css';
 
-const DEFAULT_BOUNDS: SpringLayoutBounds = { width: 900, height: 580 };
+const DEFAULT_BOUNDS: SpringLayoutBounds = { width: 1000, height: 620 };
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 4;
 
-interface DragState {
+interface Camera {
+  x: number;
+  y: number;
+  scale: number;
+}
+
+interface NodeDragState {
+  kind: 'node';
   nodeNum: number;
   pointerId: number;
   offsetX: number;
@@ -30,14 +48,73 @@ interface DragState {
   moved: boolean;
 }
 
+interface PanDragState {
+  kind: 'pan';
+  pointerId: number;
+  startX: number;
+  startY: number;
+  cameraX: number;
+  cameraY: number;
+  moved: boolean;
+}
+
+type InteractionState = NodeDragState | PanDragState;
+
+interface TooltipState {
+  nodeNum: number;
+  x: number;
+  y: number;
+}
+
+type NodeCategory = 'local' | 'anchor' | 'mesh' | 'mqtt';
+
 function positionMap(layout: SpringLayoutNode[]): Map<number, SpringLayoutNode> {
   return new Map(layout.map(node => [node.nodeNum, { ...node }]));
 }
 
+function clamp(value: number, low: number, high: number): number {
+  return Math.max(low, Math.min(high, value));
+}
+
+function calculateFitCamera(
+  layout: SpringLayoutNode[],
+  bounds: SpringLayoutBounds,
+): Camera {
+  if (layout.length === 0) return { x: 0, y: 0, scale: 1 };
+
+  const minX = Math.min(...layout.map(node => node.x - node.radius));
+  const maxX = Math.max(...layout.map(node => node.x + node.radius));
+  const minY = Math.min(...layout.map(node => node.y - node.radius));
+  const maxY = Math.max(...layout.map(node => node.y + node.radius));
+  const graphWidth = Math.max(60, maxX - minX);
+  const graphHeight = Math.max(60, maxY - minY);
+  const horizontalPadding = Math.min(160, bounds.width * 0.16);
+  const verticalPadding = Math.min(120, bounds.height * 0.2);
+  const scale = clamp(
+    Math.min(
+      (bounds.width - horizontalPadding) / graphWidth,
+      (bounds.height - verticalPadding) / graphHeight,
+    ),
+    MIN_ZOOM,
+    2.8,
+  );
+
+  return {
+    x: bounds.width / 2 - ((minX + maxX) / 2) * scale,
+    y: bounds.height / 2 - ((minY + maxY) / 2) * scale,
+    scale,
+  };
+}
+
+function normalizeTimestamp(value: number | undefined): number {
+  if (!value) return 0;
+  return value < 10_000_000_000 ? value * 1000 : value;
+}
+
 function formatLastHeard(lastHeard: number | undefined, neverLabel: string): string {
-  if (!lastHeard) return neverLabel;
-  const timestampMs = lastHeard < 10_000_000_000 ? lastHeard * 1000 : lastHeard;
-  const ageSeconds = Math.max(0, Math.round((Date.now() - timestampMs) / 1000));
+  const timestamp = normalizeTimestamp(lastHeard);
+  if (!timestamp) return neverLabel;
+  const ageSeconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
   if (ageSeconds < 60) return `${ageSeconds}s ago`;
   if (ageSeconds < 3600) return `${Math.floor(ageSeconds / 60)}m ago`;
   if (ageSeconds < 86400) return `${Math.floor(ageSeconds / 3600)}h ago`;
@@ -45,13 +122,30 @@ function formatLastHeard(lastHeard: number | undefined, neverLabel: string): str
 }
 
 function edgeEvidenceLabel(edge: TopologyGraphEdge): string {
-  if (edge.kinds.length > 1) return 'NeighborInfo + traceroute';
-  return edge.kinds[0] === 'neighbor' ? 'NeighborInfo' : 'Traceroute';
+  return edge.kinds.map(kind => {
+    if (kind === 'direct') return 'Direct RX';
+    if (kind === 'neighbor') return 'NeighborInfo';
+    return 'Traceroute';
+  }).join(' + ');
+}
+
+function primaryEdgeKind(edge: TopologyGraphEdge): TopologyEdgeKind {
+  if (edge.kinds.includes('direct')) return 'direct';
+  if (edge.kinds.includes('neighbor')) return 'neighbor';
+  return 'traceroute';
+}
+
+function nodeCategory(node: TopologyGraphNode): NodeCategory {
+  if (node.isLocal) return 'local';
+  if (node.isAnchor) return 'anchor';
+  if (node.viaMqtt) return 'mqtt';
+  return 'mesh';
 }
 
 function nodeTitle(node: TopologyGraphNode): string {
-  const signal = node.snr != null ? ` · ${node.snr.toFixed(1)} dB SNR` : '';
-  return `${node.label}\n${node.id} · ${node.degree} direct link${node.degree === 1 ? '' : 's'}${signal}`;
+  const details = [node.role, `${node.degree} link${node.degree === 1 ? '' : 's'}`];
+  if (node.snr != null) details.push(`${node.snr.toFixed(1)} dB SNR`);
+  return `${node.label}\n${node.id} · ${details.filter(Boolean).join(' · ')}`;
 }
 
 export default function TopologyView() {
@@ -59,20 +153,34 @@ export default function TopologyView() {
   const { nodes, isLoading } = useNodes();
   const { currentNodeId } = useData();
   const { neighborInfo, traceroutes } = useMapContext();
-  const [windowHours, setWindowHours] = useState<TopologyWindowHours>(24);
+  const [windowHours, setWindowHours] = useState<TopologyWindowHours>(168);
   const [includeIsolated, setIncludeIsolated] = useState(false);
-  const [showLabels, setShowLabels] = useState(true);
-  const [paused, setPaused] = useState(() => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false);
+  const [edgeVisibility, setEdgeVisibility] = useState<Record<TopologyEdgeKind, boolean>>({
+    direct: true,
+    neighbor: true,
+    traceroute: true,
+  });
+  const [nodeVisibility, setNodeVisibility] = useState<Record<NodeCategory, boolean>>({
+    local: true,
+    anchor: true,
+    mesh: true,
+    mqtt: true,
+  });
   const [selectedNodeNum, setSelectedNodeNum] = useState<number | null>(null);
-  const [hoveredNodeNum, setHoveredNodeNum] = useState<number | null>(null);
+  const [tooltip, setTooltip] = useState<TooltipState | null>(null);
   const [bounds, setBounds] = useState<SpringLayoutBounds>(DEFAULT_BOUNDS);
   const [positions, setPositions] = useState<Map<number, SpringLayoutNode>>(new Map());
+  const [camera, setCamera] = useState<Camera>({ x: 0, y: 0, scale: 1 });
   const [layoutVersion, setLayoutVersion] = useState(0);
   const [wakeVersion, setWakeVersion] = useState(0);
   const canvasRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const layoutRef = useRef<SpringLayoutNode[]>([]);
-  const dragRef = useRef<DragState | null>(null);
+  const interactionRef = useRef<InteractionState | null>(null);
+  const autoFitRef = useRef(true);
+  const reduceMotionRef = useRef(
+    typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
+  );
 
   const graph = useMemo(() => buildTopologyGraph({
     nodes,
@@ -83,11 +191,40 @@ export default function TopologyView() {
     includeIsolated,
   }), [nodes, neighborInfo, traceroutes, currentNodeId, windowHours, includeIsolated]);
 
+  const nodesByNum = useMemo(
+    () => new Map(graph.nodes.map(node => [node.nodeNum, node])),
+    [graph.nodes],
+  );
+
+  const visibleNodeNums = useMemo(() => new Set(
+    graph.nodes
+      .filter(node => nodeVisibility[nodeCategory(node)])
+      .map(node => node.nodeNum),
+  ), [graph.nodes, nodeVisibility]);
+
+  const activeEdges = useMemo(() => graph.edges.filter(edge =>
+    edge.kinds.some(kind => edgeVisibility[kind])
+      && visibleNodeNums.has(edge.source)
+      && visibleNodeNums.has(edge.target)),
+  [edgeVisibility, graph.edges, visibleNodeNums]);
+
+  const selectedNode = selectedNodeNum == null ? undefined : nodesByNum.get(selectedNodeNum);
+  const hoveredNode = tooltip == null ? undefined : nodesByNum.get(tooltip.nodeNum);
+  const selectedNeighborhood = useMemo(() => {
+    if (selectedNodeNum == null) return null;
+    const result = new Set<number>([selectedNodeNum]);
+    for (const edge of activeEdges) {
+      if (edge.source === selectedNodeNum) result.add(edge.target);
+      if (edge.target === selectedNodeNum) result.add(edge.source);
+    }
+    return result;
+  }, [activeEdges, selectedNodeNum]);
+
   useEffect(() => {
-    if (selectedNodeNum != null && !graph.nodes.some(node => node.nodeNum === selectedNodeNum)) {
+    if (selectedNodeNum != null && !visibleNodeNums.has(selectedNodeNum)) {
       setSelectedNodeNum(null);
     }
-  }, [graph.nodes, selectedNodeNum]);
+  }, [selectedNodeNum, visibleNodeNums]);
 
   useEffect(() => {
     const host = canvasRef.current;
@@ -96,7 +233,7 @@ export default function TopologyView() {
       const rect = host.getBoundingClientRect();
       setBounds({
         width: Math.max(320, Math.round(rect.width)),
-        height: Math.max(440, Math.round(rect.height)),
+        height: Math.max(460, Math.round(rect.height)),
       });
     };
     updateSize();
@@ -106,65 +243,59 @@ export default function TopologyView() {
   }, []);
 
   useEffect(() => {
-    layoutRef.current = createSpringLayout(graph.nodes, bounds, layoutRef.current);
-    setPositions(positionMap(layoutRef.current));
+    const next = createSpringLayout(graph.nodes, bounds, layoutRef.current);
+    layoutRef.current = next;
+    autoFitRef.current = true;
+
+    if (reduceMotionRef.current) {
+      const visibleLayout = next.filter(node => visibleNodeNums.has(node.nodeNum));
+      for (let tick = 0; tick < 180; tick += 1) {
+        stepSpringLayout(visibleLayout, activeEdges, bounds, Math.max(0.02, 1 - tick / 180));
+      }
+      setPositions(positionMap(next));
+      setCamera(calculateFitCamera(visibleLayout, bounds));
+      autoFitRef.current = false;
+      return;
+    }
+
+    setPositions(positionMap(next));
     setWakeVersion(version => version + 1);
-  }, [graph.nodes, bounds, layoutVersion]);
+  }, [bounds, graph.nodes, layoutVersion]); // edge filters wake the existing layout below
 
   useEffect(() => {
-    if (paused || layoutRef.current.length === 0) return;
+    autoFitRef.current = true;
+    setWakeVersion(version => version + 1);
+  }, [activeEdges, visibleNodeNums]);
+
+  useEffect(() => {
+    if (reduceMotionRef.current || layoutRef.current.length === 0) return;
     let frameId = 0;
     let energy = 1;
     let frameCount = 0;
 
     const tick = () => {
-      stepSpringLayout(layoutRef.current, graph.edges, bounds, energy);
-      energy *= 0.965;
+      const visibleLayout = layoutRef.current.filter(node => visibleNodeNums.has(node.nodeNum));
+      stepSpringLayout(visibleLayout, activeEdges, bounds, energy);
+      energy *= 0.968;
       frameCount += 1;
-      if (frameCount % 2 === 0 || energy < 0.03) {
+
+      if (frameCount % 2 === 0 || energy < 0.04) {
         setPositions(positionMap(layoutRef.current));
       }
-      if (energy > 0.012 || dragRef.current) {
+      if (autoFitRef.current && (frameCount >= 72 || energy < 0.08)) {
+        setCamera(calculateFitCamera(visibleLayout, bounds));
+        autoFitRef.current = false;
+      }
+      if (energy > 0.012 || interactionRef.current?.kind === 'node') {
         frameId = requestAnimationFrame(tick);
       }
     };
 
     frameId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frameId);
-  }, [bounds, graph.edges, paused, wakeVersion]);
+  }, [activeEdges, bounds, visibleNodeNums, wakeVersion]);
 
-  const nodesByNum = useMemo(
-    () => new Map(graph.nodes.map(node => [node.nodeNum, node])),
-    [graph.nodes],
-  );
-
-  const selectedNode = selectedNodeNum == null ? undefined : nodesByNum.get(selectedNodeNum);
-  const selectedEdges = useMemo(
-    () => selectedNodeNum == null
-      ? []
-      : graph.edges.filter(edge => edge.source === selectedNodeNum || edge.target === selectedNodeNum),
-    [graph.edges, selectedNodeNum],
-  );
-  const selectedNeighborhood = useMemo(() => {
-    if (selectedNodeNum == null) return null;
-    const result = new Set<number>([selectedNodeNum]);
-    for (const edge of selectedEdges) {
-      result.add(edge.source);
-      result.add(edge.target);
-    }
-    return result;
-  }, [selectedEdges, selectedNodeNum]);
-
-  const selectedNeighbors = useMemo(() => selectedEdges
-    .map(edge => {
-      const neighborNum = edge.source === selectedNodeNum ? edge.target : edge.source;
-      return { edge, node: nodesByNum.get(neighborNum) };
-    })
-    .filter((entry): entry is { edge: TopologyGraphEdge; node: TopologyGraphNode } => entry.node != null)
-    .sort((a, b) => b.edge.timestamp - a.edge.timestamp || a.node.label.localeCompare(b.node.label)),
-  [nodesByNum, selectedEdges, selectedNodeNum]);
-
-  const toCanvasPoint = useCallback((clientX: number, clientY: number) => {
+  const toSvgPoint = useCallback((clientX: number, clientY: number) => {
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect) return { x: 0, y: 0 };
     return {
@@ -173,11 +304,21 @@ export default function TopologyView() {
     };
   }, [bounds.height, bounds.width]);
 
-  const handlePointerDown = useCallback((event: React.PointerEvent<SVGGElement>, nodeNum: number) => {
+  const toWorldPoint = useCallback((clientX: number, clientY: number) => {
+    const point = toSvgPoint(clientX, clientY);
+    return {
+      x: (point.x - camera.x) / camera.scale,
+      y: (point.y - camera.y) / camera.scale,
+    };
+  }, [camera, toSvgPoint]);
+
+  const handleNodePointerDown = useCallback((event: ReactPointerEvent<SVGGElement>, nodeNum: number) => {
+    event.stopPropagation();
     const layoutNode = layoutRef.current.find(node => node.nodeNum === nodeNum);
     if (!layoutNode) return;
-    const point = toCanvasPoint(event.clientX, event.clientY);
-    dragRef.current = {
+    const point = toWorldPoint(event.clientX, event.clientY);
+    interactionRef.current = {
+      kind: 'node',
       nodeNum,
       pointerId: event.pointerId,
       offsetX: layoutNode.x - point.x,
@@ -186,112 +327,253 @@ export default function TopologyView() {
       startY: point.y,
       moved: false,
     };
+    autoFitRef.current = false;
     layoutNode.fixed = true;
     event.currentTarget.setPointerCapture(event.pointerId);
     setWakeVersion(version => version + 1);
-  }, [toCanvasPoint]);
+  }, [toWorldPoint]);
 
-  const handlePointerMove = useCallback((event: React.PointerEvent<SVGSVGElement>) => {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    const point = toCanvasPoint(event.clientX, event.clientY);
-    const layoutNode = layoutRef.current.find(node => node.nodeNum === drag.nodeNum);
+  const handleCanvasPointerDown = useCallback((event: ReactPointerEvent<SVGSVGElement>) => {
+    const point = toSvgPoint(event.clientX, event.clientY);
+    interactionRef.current = {
+      kind: 'pan',
+      pointerId: event.pointerId,
+      startX: point.x,
+      startY: point.y,
+      cameraX: camera.x,
+      cameraY: camera.y,
+      moved: false,
+    };
+    autoFitRef.current = false;
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }, [camera.x, camera.y, toSvgPoint]);
+
+  const handlePointerMove = useCallback((event: ReactPointerEvent<SVGSVGElement>) => {
+    const interaction = interactionRef.current;
+    if (!interaction || interaction.pointerId !== event.pointerId) return;
+    const screenPoint = toSvgPoint(event.clientX, event.clientY);
+
+    if (interaction.kind === 'pan') {
+      if (Math.hypot(screenPoint.x - interaction.startX, screenPoint.y - interaction.startY) > 3) {
+        interaction.moved = true;
+      }
+      setCamera(current => ({
+        ...current,
+        x: interaction.cameraX + screenPoint.x - interaction.startX,
+        y: interaction.cameraY + screenPoint.y - interaction.startY,
+      }));
+      return;
+    }
+
+    const worldPoint = {
+      x: (screenPoint.x - camera.x) / camera.scale,
+      y: (screenPoint.y - camera.y) / camera.scale,
+    };
+    const layoutNode = layoutRef.current.find(node => node.nodeNum === interaction.nodeNum);
     if (!layoutNode) return;
-    if (Math.hypot(point.x - drag.startX, point.y - drag.startY) > 4) drag.moved = true;
-    layoutNode.x = Math.max(layoutNode.radius, Math.min(bounds.width - layoutNode.radius, point.x + drag.offsetX));
-    layoutNode.y = Math.max(layoutNode.radius, Math.min(bounds.height - layoutNode.radius, point.y + drag.offsetY));
+    if (Math.hypot(worldPoint.x - interaction.startX, worldPoint.y - interaction.startY) > 3 / camera.scale) {
+      interaction.moved = true;
+    }
+    layoutNode.x = worldPoint.x + interaction.offsetX;
+    layoutNode.y = worldPoint.y + interaction.offsetY;
     layoutNode.vx = 0;
     layoutNode.vy = 0;
     setPositions(positionMap(layoutRef.current));
-  }, [bounds.height, bounds.width, toCanvasPoint]);
+  }, [camera, toSvgPoint]);
 
-  const finishDrag = useCallback((event: React.PointerEvent<SVGSVGElement>) => {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    const layoutNode = layoutRef.current.find(node => node.nodeNum === drag.nodeNum);
-    if (layoutNode) layoutNode.fixed = false;
-    if (!drag.moved) {
-      setSelectedNodeNum(current => current === drag.nodeNum ? null : drag.nodeNum);
+  const finishInteraction = useCallback((event: ReactPointerEvent<SVGSVGElement>) => {
+    const interaction = interactionRef.current;
+    if (!interaction || interaction.pointerId !== event.pointerId) return;
+    if (interaction.kind === 'node') {
+      const layoutNode = layoutRef.current.find(node => node.nodeNum === interaction.nodeNum);
+      if (layoutNode) layoutNode.fixed = false;
+      if (!interaction.moved) {
+        setSelectedNodeNum(current => current === interaction.nodeNum ? null : interaction.nodeNum);
+      }
+      setWakeVersion(version => version + 1);
+    } else if (!interaction.moved) {
+      setSelectedNodeNum(null);
     }
-    dragRef.current = null;
-    setWakeVersion(version => version + 1);
+    interactionRef.current = null;
   }, []);
+
+  const zoomBy = useCallback((factor: number, center?: { x: number; y: number }) => {
+    autoFitRef.current = false;
+    setCamera(current => {
+      const nextScale = clamp(current.scale * factor, MIN_ZOOM, MAX_ZOOM);
+      const focus = center ?? { x: bounds.width / 2, y: bounds.height / 2 };
+      const worldX = (focus.x - current.x) / current.scale;
+      const worldY = (focus.y - current.y) / current.scale;
+      return {
+        scale: nextScale,
+        x: focus.x - worldX * nextScale,
+        y: focus.y - worldY * nextScale,
+      };
+    });
+  }, [bounds.height, bounds.width]);
+
+  const handleWheel = useCallback((event: ReactWheelEvent<SVGSVGElement>) => {
+    event.preventDefault();
+    zoomBy(event.deltaY < 0 ? 1.14 : 1 / 1.14, toSvgPoint(event.clientX, event.clientY));
+  }, [toSvgPoint, zoomBy]);
+
+  const fitView = useCallback(() => {
+    const visibleLayout = layoutRef.current.filter(node => visibleNodeNums.has(node.nodeNum));
+    setCamera(calculateFitCamera(visibleLayout, bounds));
+    autoFitRef.current = false;
+  }, [bounds, visibleNodeNums]);
 
   const resetLayout = () => {
     layoutRef.current = [];
+    autoFitRef.current = true;
+    setSelectedNodeNum(null);
     setLayoutVersion(version => version + 1);
   };
 
-  const windowOptions: Array<{ value: TopologyWindowHours; label: string }> = [
-    { value: 1, label: '1h' },
-    { value: 6, label: '6h' },
-    { value: 24, label: '24h' },
-    { value: 168, label: '7d' },
-    { value: null, label: t('topology.all_time', 'All') },
-  ];
+  const toggleEdgeKind = (kind: TopologyEdgeKind) => {
+    setEdgeVisibility(current => ({ ...current, [kind]: !current[kind] }));
+  };
+
+  const toggleNodeCategory = (category: NodeCategory) => {
+    setNodeVisibility(current => ({ ...current, [category]: !current[category] }));
+  };
+
+  const exportPng = useCallback(async () => {
+    const sourceSvg = svgRef.current;
+    if (!sourceSvg) return;
+    const clone = sourceSvg.cloneNode(true) as SVGSVGElement;
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    clone.setAttribute('width', String(bounds.width));
+    clone.setAttribute('height', String(bounds.height));
+
+    const styles = getComputedStyle(document.documentElement);
+    const color = (name: string, fallback: string) => styles.getPropertyValue(name).trim() || fallback;
+    const embeddedStyle = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+    embeddedStyle.textContent = `
+      .topology-pan-surface{fill:transparent}
+      .topology-edge{fill:none;stroke-width:1.7;opacity:.62}
+      .topology-edge.direct{stroke:${color('--color-success', '#34d399')}}
+      .topology-edge.neighbor{stroke:${color('--color-accent', '#22d3ee')}}
+      .topology-edge.traceroute{stroke:${color('--color-warning', '#fbbf24')};stroke-dasharray:6 5}
+      .topology-edge.dimmed{opacity:.08}.topology-edge.emphasized{opacity:1;stroke-width:3}
+      .topology-node-dot{fill:${color('--color-accent', '#22d3ee')};stroke:${color('--color-bg-sunken', '#0f172a')};stroke-width:2}
+      .topology-node.local .topology-node-dot{fill:${color('--color-success', '#34d399')}}
+      .topology-node.mqtt .topology-node-dot{fill:${color('--color-accent-alt', '#a855f7')}}
+      .topology-node-ring{fill:none;stroke:${color('--color-warning', '#fbbf24')};stroke-width:1.5}
+      .topology-node-label{fill:${color('--color-text', '#e2e8f0')};font-family:sans-serif;font-weight:600}
+      .topology-node.dimmed{opacity:.18}
+    `;
+    clone.prepend(embeddedStyle);
+
+    const blob = new Blob([new XMLSerializer().serializeToString(clone)], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const image = new Image();
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error('Could not render topology export'));
+      image.src = url;
+    });
+
+    const scale = 2;
+    const output = document.createElement('canvas');
+    output.width = bounds.width * scale;
+    output.height = bounds.height * scale;
+    const context = output.getContext('2d');
+    if (!context) return;
+    context.scale(scale, scale);
+    context.fillStyle = color('--color-bg-sunken', '#0f172a');
+    context.fillRect(0, 0, bounds.width, bounds.height);
+    context.drawImage(image, 0, 0, bounds.width, bounds.height);
+    URL.revokeObjectURL(url);
+
+    output.toBlob(png => {
+      if (!png) return;
+      const downloadUrl = URL.createObjectURL(png);
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = `meshmonitor-topology-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.png`;
+      link.click();
+      URL.revokeObjectURL(downloadUrl);
+    }, 'image/png');
+  }, [bounds]);
+
+  const activeNodeCount = [...visibleNodeNums].length;
+  const displayedNode = hoveredNode ?? selectedNode;
+  const tooltipPosition = hoveredNode && tooltip
+    ? { left: tooltip.x, top: tooltip.y }
+    : undefined;
 
   return (
     <section className="topology-view" aria-labelledby="topology-title">
-      <header className="topology-header">
-        <div>
-          <div className="topology-eyebrow">
-            <UiIcon name="network" size={15} />
-            {t('topology.live_graph', 'Logical mesh graph')}
+      <div className="topology-panel">
+        <header className="topology-panel-header">
+          <div className="topology-panel-title">
+            <span className="topology-panel-icon"><UiIcon name="network" size={17} /></span>
+            <div>
+              <h1 id="topology-title">{t('topology.title', 'Mesh topology')}</h1>
+              <p>{t('topology.description_v2', 'Live RF graph from direct receptions, NeighborInfo reports, and traceroutes.')}</p>
+            </div>
           </div>
-          <h1 id="topology-title">{t('topology.title', 'Mesh topology')}</h1>
-          <p>{t('topology.description', 'Drag a node and the mesh responds like a spring. Links come from recent NeighborInfo reports and traceroutes.')}</p>
-        </div>
-        <div className="topology-stats" aria-label={t('topology.summary', 'Topology summary')}>
-          <div><strong>{graph.nodes.length}</strong><span>{t('topology.nodes', 'nodes')}</span></div>
-          <div><strong>{graph.edges.length}</strong><span>{t('topology.links', 'links')}</span></div>
-          <div><strong>{graph.connectedNodeCount}</strong><span>{t('topology.connected', 'connected')}</span></div>
-        </div>
-      </header>
 
-      <div className="topology-toolbar">
-        <div className="topology-window-control" role="group" aria-label={t('topology.time_window', 'Time window')}>
-          {windowOptions.map(option => (
+          <div className="topology-controls">
+            <div className="topology-edge-filters" role="group" aria-label={t('topology.link_filters', 'Link filters')}>
+              {(['traceroute', 'direct', 'neighbor'] as TopologyEdgeKind[]).map(kind => (
+                <button
+                  key={kind}
+                  type="button"
+                  className={`topology-chip ${kind}${edgeVisibility[kind] ? ' active' : ''}`}
+                  aria-pressed={edgeVisibility[kind]}
+                  onClick={() => toggleEdgeKind(kind)}
+                >
+                  {kind === 'direct'
+                    ? t('topology.direct_rx', 'Direct RX')
+                    : kind === 'neighbor'
+                      ? t('topology.neighbors', 'Neighbours')
+                      : t('topology.traced_link', 'Traceroute')}
+                </button>
+              ))}
+            </div>
+
+            <label className="topology-window-select">
+              <span>{t('topology.window', 'Window')}</span>
+              <select
+                value={windowHours == null ? 'all' : windowHours}
+                onChange={event => setWindowHours(event.target.value === 'all' ? null : Number(event.target.value) as TopologyWindowHours)}
+              >
+                <option value={1}>1h</option>
+                <option value={6}>6h</option>
+                <option value={24}>24h</option>
+                <option value={168}>7d</option>
+                <option value="all">{t('topology.all_time', 'All')}</option>
+              </select>
+            </label>
+
             <button
-              key={option.label}
               type="button"
-              className={windowHours === option.value ? 'active' : ''}
-              aria-pressed={windowHours === option.value}
-              onClick={() => setWindowHours(option.value)}
+              className={`topology-tool-button${includeIsolated ? ' active' : ''}`}
+              aria-pressed={includeIsolated}
+              onClick={() => setIncludeIsolated(value => !value)}
+              title={t('topology.isolated_help', 'Show nodes with no known links')}
             >
-              {option.label}
+              {t('topology.all_nodes', 'All nodes')}
             </button>
-          ))}
-        </div>
-        <div className="topology-toolbar-actions">
-          <label className="topology-switch">
-            <input type="checkbox" checked={showLabels} onChange={event => setShowLabels(event.target.checked)} />
-            <span>{t('topology.labels', 'Labels')}</span>
-          </label>
-          <label className="topology-switch">
-            <input type="checkbox" checked={includeIsolated} onChange={event => setIncludeIsolated(event.target.checked)} />
-            <span>{t('topology.isolated', 'Isolated nodes')}</span>
-          </label>
-          <button type="button" className="topology-icon-button" onClick={() => {
-            setPaused(value => !value);
-            setWakeVersion(version => version + 1);
-          }}>
-            <UiIcon name={paused ? 'play' : 'pause'} size={16} />
-            {paused ? t('topology.resume', 'Resume') : t('topology.pause', 'Pause')}
-          </button>
-          <button type="button" className="topology-icon-button" onClick={resetLayout}>
-            <UiIcon name="refresh" size={16} />
-            {t('topology.reset', 'Reset layout')}
-          </button>
-        </div>
-      </div>
+            <button type="button" className="topology-tool-button square" onClick={() => zoomBy(1 / 1.3)} title={t('topology.zoom_out', 'Zoom out')}>−</button>
+            <button type="button" className="topology-tool-button square" onClick={() => zoomBy(1.3)} title={t('topology.zoom_in', 'Zoom in')}>+</button>
+            <button type="button" className="topology-tool-button" onClick={fitView}>{t('topology.fit', 'Fit')}</button>
+            <button type="button" className="topology-tool-button icon" onClick={resetLayout} title={t('topology.refresh_layout', 'Refresh and reheat layout')}>
+              <UiIcon name="refresh" size={14} />
+              {t('topology.refresh', 'Refresh')}
+            </button>
+            <button type="button" className="topology-tool-button" onClick={() => void exportPng()}>{t('topology.export_png', 'Export PNG')}</button>
+          </div>
+        </header>
 
-      <div className="topology-workspace">
         <div className="topology-canvas" ref={canvasRef}>
           {isLoading && graph.nodes.length === 0 ? (
             <div className="topology-empty">{t('topology.loading', 'Loading mesh data…')}</div>
           ) : graph.nodes.length === 0 ? (
             <div className="topology-empty">
-              <UiIcon name="network" size={38} />
+              <UiIcon name="network" size={34} />
               <strong>{t('topology.empty_title', 'No topology observations yet')}</strong>
               <span>{t('topology.empty_description', 'Wait for a NeighborInfo broadcast or run a traceroute, then come back here.')}</span>
             </div>
@@ -302,148 +584,150 @@ export default function TopologyView() {
               viewBox={`0 0 ${bounds.width} ${bounds.height}`}
               role="group"
               aria-label={t('topology.graph_aria', 'Interactive force-directed mesh topology graph')}
+              onPointerDown={handleCanvasPointerDown}
               onPointerMove={handlePointerMove}
-              onPointerUp={finishDrag}
-              onPointerCancel={finishDrag}
+              onPointerUp={finishInteraction}
+              onPointerCancel={finishInteraction}
+              onPointerLeave={() => setTooltip(null)}
+              onWheel={handleWheel}
             >
-              <defs>
-                <pattern id="topology-grid" width="32" height="32" patternUnits="userSpaceOnUse">
-                  <path d="M 32 0 L 0 0 0 32" className="topology-grid-line" fill="none" />
-                </pattern>
-                <filter id="topology-glow" x="-80%" y="-80%" width="260%" height="260%">
-                  <feGaussianBlur stdDeviation="5" result="blur" />
-                  <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
-                </filter>
-              </defs>
-              <rect width={bounds.width} height={bounds.height} fill="url(#topology-grid)" />
-              <g className="topology-edges">
-                {graph.edges.map(edge => {
-                  const source = positions.get(edge.source);
-                  const target = positions.get(edge.target);
-                  if (!source || !target) return null;
-                  const isSelected = selectedNodeNum == null || edge.source === selectedNodeNum || edge.target === selectedNodeNum;
-                  const evidenceClass = edge.kinds.length > 1
-                    ? 'mixed'
-                    : edge.kinds[0] === 'neighbor' ? 'neighbor' : 'traceroute';
-                  return (
-                    <line
-                      key={edge.id}
-                      x1={source.x}
-                      y1={source.y}
-                      x2={target.x}
-                      y2={target.y}
-                      className={`topology-edge ${evidenceClass}${isSelected ? ' highlighted' : ' dimmed'}`}
-                    >
-                      <title>{`${edgeEvidenceLabel(edge)}${edge.snr == null ? '' : ` · ${edge.snr.toFixed(1)} dB SNR`}`}</title>
-                    </line>
-                  );
-                })}
-              </g>
-              <g className="topology-nodes">
-                {graph.nodes.map(node => {
-                  const position = positions.get(node.nodeNum);
-                  if (!position) return null;
-                  const selected = selectedNodeNum === node.nodeNum;
-                  const hovered = hoveredNodeNum === node.nodeNum;
-                  const dimmed = selectedNeighborhood != null && !selectedNeighborhood.has(node.nodeNum);
-                  const nodeClass = [
-                    'topology-node',
-                    node.isLocal ? 'local' : '',
-                    node.viaMqtt ? 'mqtt' : '',
-                    node.isPlaceholder ? 'placeholder' : '',
-                    selected ? 'selected' : '',
-                    dimmed ? 'dimmed' : '',
-                  ].filter(Boolean).join(' ');
-                  return (
-                    <g
-                      key={node.nodeNum}
-                      className={nodeClass}
-                      transform={`translate(${position.x} ${position.y})`}
-                      role="button"
-                      tabIndex={0}
-                      aria-label={nodeTitle(node)}
-                      onPointerDown={event => handlePointerDown(event, node.nodeNum)}
-                      onPointerEnter={() => setHoveredNodeNum(node.nodeNum)}
-                      onPointerLeave={() => setHoveredNodeNum(current => current === node.nodeNum ? null : current)}
-                      onKeyDown={event => {
-                        if (event.key === 'Enter' || event.key === ' ') {
-                          event.preventDefault();
-                          setSelectedNodeNum(current => current === node.nodeNum ? null : node.nodeNum);
-                        }
-                      }}
-                    >
-                      {(selected || hovered) && <circle className="topology-node-halo" r={position.radius + 8} filter="url(#topology-glow)" />}
-                      <circle className="topology-node-dot" r={position.radius} />
-                      {node.isLocal && <circle className="topology-node-local-ring" r={position.radius + 4} />}
-                      <text className="topology-node-monogram" textAnchor="middle" dy="0.34em">
-                        {(node.shortName || node.label).slice(0, 4)}
-                      </text>
-                      {showLabels && (
-                        <text className="topology-node-label" textAnchor="middle" y={position.radius + 18}>
-                          {node.label.length > 22 ? `${node.label.slice(0, 20)}…` : node.label}
-                        </text>
-                      )}
-                      <title>{nodeTitle(node)}</title>
-                    </g>
-                  );
-                })}
+              <rect className="topology-pan-surface" width={bounds.width} height={bounds.height} />
+              <g transform={`translate(${camera.x} ${camera.y}) scale(${camera.scale})`}>
+                <g className="topology-edges">
+                  {activeEdges.map(edge => {
+                    const source = positions.get(edge.source);
+                    const target = positions.get(edge.target);
+                    if (!source || !target) return null;
+                    const connectedToSelection = selectedNodeNum == null
+                      || edge.source === selectedNodeNum
+                      || edge.target === selectedNodeNum;
+                    const kind = primaryEdgeKind(edge);
+                    return (
+                      <line
+                        key={edge.id}
+                        x1={source.x}
+                        y1={source.y}
+                        x2={target.x}
+                        y2={target.y}
+                        className={`topology-edge ${kind}${selectedNodeNum == null ? '' : connectedToSelection ? ' emphasized' : ' dimmed'}`}
+                        style={{ strokeWidth: 1.15 + Math.min(2.2, Math.log2(1 + edge.observations) * 0.62) }}
+                      >
+                        <title>{`${edgeEvidenceLabel(edge)}${edge.snr == null ? '' : ` · ${edge.snr.toFixed(1)} dB SNR`}`}</title>
+                      </line>
+                    );
+                  })}
+                </g>
+                <g className="topology-nodes">
+                  {graph.nodes.filter(node => visibleNodeNums.has(node.nodeNum)).map(node => {
+                    const position = positions.get(node.nodeNum);
+                    if (!position) return null;
+                    const selected = selectedNodeNum === node.nodeNum;
+                    const hovered = tooltip?.nodeNum === node.nodeNum;
+                    const dimmed = selectedNeighborhood != null && !selectedNeighborhood.has(node.nodeNum);
+                    const category = nodeCategory(node);
+                    const displayRadius = position.radius / Math.sqrt(camera.scale);
+                    const labelVisible = node.isLocal || node.isAnchor || node.degree >= 2 || selected || hovered;
+                    const nodeClass = [
+                      'topology-node',
+                      category,
+                      node.isPlaceholder ? 'placeholder' : '',
+                      selected ? 'selected' : '',
+                      dimmed ? 'dimmed' : '',
+                    ].filter(Boolean).join(' ');
+                    return (
+                      <g
+                        key={node.nodeNum}
+                        className={nodeClass}
+                        transform={`translate(${position.x} ${position.y})`}
+                        role="button"
+                        tabIndex={0}
+                        aria-label={nodeTitle(node)}
+                        onPointerDown={event => handleNodePointerDown(event, node.nodeNum)}
+                        onPointerEnter={event => {
+                          const rect = canvasRef.current?.getBoundingClientRect();
+                          if (!rect) return;
+                          setTooltip({ nodeNum: node.nodeNum, x: event.clientX - rect.left + 14, y: event.clientY - rect.top + 14 });
+                        }}
+                        onPointerMove={event => {
+                          if (interactionRef.current) return;
+                          const rect = canvasRef.current?.getBoundingClientRect();
+                          if (!rect) return;
+                          setTooltip({ nodeNum: node.nodeNum, x: event.clientX - rect.left + 14, y: event.clientY - rect.top + 14 });
+                        }}
+                        onPointerLeave={() => setTooltip(current => current?.nodeNum === node.nodeNum ? null : current)}
+                        onKeyDown={event => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            setSelectedNodeNum(current => current === node.nodeNum ? null : node.nodeNum);
+                          }
+                        }}
+                      >
+                        <circle className="topology-node-hit" r={displayRadius + 7 / camera.scale} />
+                        <circle className="topology-node-dot" r={displayRadius} />
+                        {(node.isAnchor || node.isLocal || selected) && (
+                          <circle className="topology-node-ring" r={displayRadius + 3 / camera.scale} />
+                        )}
+                        {labelVisible && (
+                          <text
+                            className="topology-node-label"
+                            x={displayRadius + 5 / camera.scale}
+                            y={4 / camera.scale}
+                            style={{ fontSize: `${11 / camera.scale}px` }}
+                          >
+                            {node.label.length > 28 ? `${node.label.slice(0, 26)}…` : node.label}
+                          </text>
+                        )}
+                        <title>{nodeTitle(node)}</title>
+                      </g>
+                    );
+                  })}
+                </g>
               </g>
             </svg>
           )}
-          <div className="topology-legend" aria-label={t('topology.legend', 'Topology legend')}>
-            <span><i className="topology-legend-line neighbor" />{t('topology.neighbor_link', 'NeighborInfo')}</span>
-            <span><i className="topology-legend-line traceroute" />{t('topology.traced_link', 'Traceroute')}</span>
-            <span><i className="topology-legend-line mixed" />{t('topology.confirmed_link', 'Both')}</span>
-            <span><i className="topology-legend-node local" />{t('topology.local_node', 'Local node')}</span>
-          </div>
-          <div className="topology-canvas-hint">{t('topology.drag_hint', 'Drag nodes to feel the mesh')}</div>
-        </div>
 
-        <aside className="topology-inspector" aria-live="polite">
-          {selectedNode ? (
-            <>
-              <div className="topology-inspector-heading">
-                <span className={`topology-inspector-dot${selectedNode.isLocal ? ' local' : ''}`} />
-                <div>
-                  <span>{selectedNode.isLocal ? t('topology.this_radio', 'This radio') : t('topology.selected_node', 'Selected node')}</span>
-                  <h2>{selectedNode.label}</h2>
-                  <code>{selectedNode.id}</code>
-                </div>
-              </div>
-              <dl className="topology-node-facts">
-                <div><dt>{t('topology.direct_links', 'Direct links')}</dt><dd>{selectedNode.degree}</dd></div>
-                <div><dt>{t('topology.last_heard', 'Last heard')}</dt><dd>{formatLastHeard(selectedNode.lastHeard, t('topology.never', 'Never'))}</dd></div>
-                <div><dt>{t('topology.hops_away', 'Hops away')}</dt><dd>{selectedNode.hopsAway ?? '—'}</dd></div>
-                <div><dt>{t('topology.signal', 'Signal')}</dt><dd>{selectedNode.snr != null ? `${selectedNode.snr.toFixed(1)} dB` : '—'}</dd></div>
-              </dl>
-              <div className="topology-neighbor-heading">
-                <h3>{t('topology.neighbors', 'Connected nodes')}</h3>
-                <span>{selectedNeighbors.length}</span>
-              </div>
-              <div className="topology-neighbor-list">
-                {selectedNeighbors.length === 0 ? (
-                  <p>{t('topology.no_direct_links', 'No direct link observations in this window.')}</p>
-                ) : selectedNeighbors.map(({ edge, node }) => (
-                  <button key={edge.id} type="button" onClick={() => setSelectedNodeNum(node.nodeNum)}>
-                    <span className={`topology-neighbor-evidence ${edge.kinds.length > 1 ? 'mixed' : edge.kinds[0]}`} />
-                    <span><strong>{node.label}</strong><small>{edgeEvidenceLabel(edge)}</small></span>
-                    <em>{edge.snr == null ? '—' : `${edge.snr.toFixed(1)} dB`}</em>
-                  </button>
-                ))}
-              </div>
-            </>
-          ) : (
-            <div className="topology-inspector-empty">
-              <div className="topology-inspector-orbit"><UiIcon name="network" size={30} /></div>
-              <h2>{t('topology.explore_title', 'Explore the mesh')}</h2>
-              <p>{t('topology.explore_description', 'Select a node to isolate its immediate neighborhood and inspect the evidence behind each link.')}</p>
-              <div className="topology-evidence-summary">
-                <span><strong>{graph.neighborEdgeCount}</strong>{t('topology.neighbor_links', 'neighbor links')}</span>
-                <span><strong>{graph.tracerouteEdgeCount}</strong>{t('topology.traceroute_links', 'traced links')}</span>
-              </div>
+          {displayedNode && (
+            <div
+              className={`topology-tooltip${hoveredNode ? '' : ' pinned'}`}
+              style={tooltipPosition}
+              role="status"
+            >
+              <strong>{displayedNode.label}</strong>
+              <code>{displayedNode.id}</code>
+              <span>{[displayedNode.role, `${displayedNode.degree} link${displayedNode.degree === 1 ? '' : 's'}`].filter(Boolean).join(' · ')}</span>
+              <span>{formatLastHeard(displayedNode.lastHeard, t('topology.never', 'Never heard'))}</span>
+              {displayedNode.snr != null && <span>{displayedNode.snr.toFixed(1)} dB SNR</span>}
+              {!hoveredNode && (
+                <button type="button" onClick={() => setSelectedNodeNum(null)} aria-label={t('common.close', 'Close')}>×</button>
+              )}
             </div>
           )}
-        </aside>
+        </div>
+
+        <footer className="topology-footer">
+          <div className="topology-node-filters" role="group" aria-label={t('topology.node_filters', 'Node filters')}>
+            {([
+              ['local', t('topology.this_radio', 'this radio')],
+              ['anchor', t('topology.neighbor_source', 'neighbour source')],
+              ['mesh', t('topology.mesh_nodes', 'mesh nodes')],
+              ['mqtt', 'MQTT'],
+            ] as Array<[NodeCategory, string]>).map(([category, label]) => (
+              <button
+                key={category}
+                type="button"
+                className={`topology-node-filter ${category}${nodeVisibility[category] ? '' : ' off'}`}
+                aria-pressed={nodeVisibility[category]}
+                onClick={() => toggleNodeCategory(category)}
+              >
+                <i />{label}
+              </button>
+            ))}
+          </div>
+          <span className="topology-interaction-hint">{t('topology.interaction_hint', 'drag = move / pan · wheel = zoom · click = highlight · legend = show/hide')}</span>
+          <span className="topology-footer-stats">
+            {activeNodeCount} {t('topology.nodes', 'nodes')} · {activeEdges.length} {t('topology.links', 'links')} ({graph.tracerouteEdgeCount} {t('topology.route_short', 'route')} / {graph.directEdgeCount} {t('topology.direct_short', 'direct')} / {graph.neighborEdgeCount} {t('topology.neighbor_short', 'neighbour')})
+          </span>
+        </footer>
       </div>
     </section>
   );

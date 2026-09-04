@@ -122,6 +122,28 @@ describe('buildTopologyGraph', () => {
       isPlaceholder: true,
     });
   });
+
+  it('adds fresh zero-hop RF observations as direct links from the local radio', () => {
+    const graph = buildTopologyGraph({
+      nodes: [
+        { ...nodes[0], hopsAway: 0 },
+        { ...nodes[1], hopsAway: 0, transportLastRf: NOW / 1000, snr: 9.5 },
+        { ...nodes[2], hopsAway: 1 },
+        { ...nodes[3], hopsAway: 0, viaMqtt: true },
+      ],
+      neighborInfo: [],
+      traceroutes: [],
+      currentNodeId: '!00000064',
+      windowHours: 168,
+      nowMs: NOW,
+    });
+
+    expect(graph.edges).toEqual([
+      expect.objectContaining({ source: 100, target: 200, kinds: ['direct'], snr: 9.5 }),
+    ]);
+    expect(graph.directEdgeCount).toBe(1);
+    expect(graph.nodes.find(node => node.nodeNum === 200)?.isLocal).toBe(false);
+  });
 });
 
 describe('normalizeTopologyTimestamp', () => {

@@ -5,7 +5,7 @@ import { decomposeTracerouteLinks, isValidRouteNode } from '../../utils/tracerou
 
 export type TopologyWindowHours = 1 | 6 | 24 | 168 | null;
 
-export type TopologyEdgeKind = 'neighbor' | 'traceroute';
+export type TopologyEdgeKind = 'direct' | 'neighbor' | 'traceroute';
 
 export interface TopologyGraphNode {
   id: string;
@@ -20,6 +20,7 @@ export interface TopologyGraphNode {
   batteryLevel?: number;
   viaMqtt: boolean;
   isLocal: boolean;
+  isAnchor: boolean;
   isPlaceholder: boolean;
   degree: number;
 }
@@ -39,6 +40,7 @@ export interface TopologyGraph {
   nodes: TopologyGraphNode[];
   edges: TopologyGraphEdge[];
   connectedNodeCount: number;
+  directEdgeCount: number;
   neighborEdgeCount: number;
   tracerouteEdgeCount: number;
 }
@@ -122,7 +124,12 @@ function addObservation(
   }
 }
 
-function makeGraphNode(nodeNum: number, node?: DeviceInfo, currentNodeId?: string | null): TopologyGraphNode {
+function makeGraphNode(
+  nodeNum: number,
+  node: DeviceInfo | undefined,
+  currentNodeId: string | null | undefined,
+  anchorNums: Set<number>,
+): TopologyGraphNode {
   const id = node?.user?.id || nodeIdFromNum(nodeNum);
   const longName = node?.user?.longName?.trim();
   const shortName = node?.user?.shortName?.trim();
@@ -139,7 +146,8 @@ function makeGraphNode(nodeNum: number, node?: DeviceInfo, currentNodeId?: strin
     rssi: node?.rssi,
     batteryLevel: node?.deviceMetrics?.batteryLevel,
     viaMqtt: node?.viaMqtt === true,
-    isLocal: (currentNodeId != null && id.toLowerCase() === currentNodeId.toLowerCase()) || node?.hopsAway === 0,
+    isLocal: currentNodeId != null && id.toLowerCase() === currentNodeId.toLowerCase(),
+    isAnchor: anchorNums.has(nodeNum),
     isPlaceholder: node === undefined,
     degree: 0,
   };
@@ -161,10 +169,44 @@ export function buildTopologyGraph({
 }: BuildTopologyGraphInput): TopologyGraph {
   const cutoffMs = windowHours === null ? null : nowMs - windowHours * 60 * 60 * 1000;
   const edges = new Map<string, MutableEdge>();
+  const anchorNums = new Set<number>();
+
+  const currentNode = currentNodeId
+    ? nodes.find(node => node.user?.id?.toLowerCase() === currentNodeId.toLowerCase())
+    : undefined;
+  const parsedCurrentNodeNum = currentNodeId && /^![0-9a-f]{1,8}$/i.test(currentNodeId)
+    ? Number.parseInt(currentNodeId.slice(1), 16)
+    : Number.NaN;
+  const currentNodeNum = currentNode?.nodeNum ?? parsedCurrentNodeNum;
+
+  // A zero-hop RF observation is direct evidence between this radio and the
+  // remote node. Prefer the per-transport timestamp so a later MQTT echo does
+  // not make an old RF link look fresh.
+  if (Number.isFinite(currentNodeNum)) {
+    for (const node of nodes) {
+      if (node.nodeNum === currentNodeNum || node.hopsAway !== 0) continue;
+      const hasRfEvidence = node.transportLastRf != null
+        || (node.transportMechanism != null
+          ? node.transportMechanism >= 1 && node.transportMechanism <= 4
+          : node.viaMqtt !== true);
+      if (!hasRfEvidence) continue;
+      const timestamp = normalizeTopologyTimestamp(node.transportLastRf ?? node.lastHeard);
+      if (!isWithinWindow(timestamp, cutoffMs)) continue;
+      addObservation(
+        edges,
+        Number(currentNodeNum),
+        Number(node.nodeNum),
+        'direct',
+        timestamp,
+        typeof node.snr === 'number' ? node.snr : null,
+      );
+    }
+  }
 
   for (const info of neighborInfo) {
     const timestamp = normalizeTopologyTimestamp(info.timestamp || info.lastRxTime || info.createdAt);
     if (!isWithinWindow(timestamp, cutoffMs)) continue;
+    anchorNums.add(Number(info.nodeNum));
     addObservation(
       edges,
       Number(info.nodeNum),
@@ -216,7 +258,7 @@ export function buildTopologyGraph({
 
   const graphNodes = [...visibleNums]
     .map(nodeNum => ({
-      ...makeGraphNode(nodeNum, nodeByNum.get(nodeNum), currentNodeId),
+      ...makeGraphNode(nodeNum, nodeByNum.get(nodeNum), currentNodeId, anchorNums),
       degree: degrees.get(nodeNum) || 0,
     }))
     .sort((a, b) => {
@@ -242,6 +284,7 @@ export function buildTopologyGraph({
     nodes: graphNodes,
     edges: graphEdges,
     connectedNodeCount: connectedNums.size,
+    directEdgeCount: graphEdges.filter(edge => edge.kinds.includes('direct')).length,
     neighborEdgeCount: graphEdges.filter(edge => edge.kinds.includes('neighbor')).length,
     tracerouteEdgeCount: graphEdges.filter(edge => edge.kinds.includes('traceroute')).length,
   };
