@@ -100,6 +100,14 @@ describe('MeshtasticManager — Virtual Node wiring', () => {
     VNConstructor.mockClear();
     startMock.mockClear();
     stopMock.mockClear();
+    getNodeMock.mockReset();
+    getNodeMock.mockResolvedValue({
+      nodeNum: 123,
+      nodeId: '!0000007b',
+      longName: 'Test Node',
+      shortName: 'TN',
+      hwModel: 1,
+    });
   });
 
   it('does not create a VirtualNodeServer when virtualNode is absent', () => {
@@ -159,6 +167,31 @@ describe('MeshtasticManager — Virtual Node wiring', () => {
 
     expect(createNodeInfoMock).toHaveBeenCalled();
     expect(broadcastMock).toHaveBeenCalledWith(expect.any(Uint8Array));
+  });
+
+  it('broadcastNodeInfoUpdate uses firmware-style names when names are missing', async () => {
+    getNodeMock.mockResolvedValueOnce({
+      nodeNum: 0x9e9d0858,
+      nodeId: '!9e9d0858',
+      longName: null,
+      shortName: null,
+      hwModel: null,
+    });
+    const mgr = new MeshtasticManager('src-1', {
+      host: '127.0.0.1',
+      port: 4403,
+      virtualNode: { enabled: true, port: 4503, allowAdminCommands: false },
+    });
+    createNodeInfoMock.mockClear();
+
+    await mgr.broadcastNodeInfoUpdate(0x9e9d0858);
+
+    expect(createNodeInfoMock).toHaveBeenCalledWith(expect.objectContaining({
+      user: expect.objectContaining({
+        longName: 'Meshtastic 0858',
+        shortName: '0858',
+      }),
+    }));
   });
 
   it('broadcastNodeInfoUpdate is a no-op when VN is disabled', async () => {

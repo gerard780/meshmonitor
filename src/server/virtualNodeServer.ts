@@ -10,6 +10,7 @@ import { getEffectiveDbNodePosition } from './utils/nodeEnhancer.js';
 import { MODEM_PRESET_CHANNEL_NAMES } from '../utils/loraFrequency.js';
 import { getMaxNodeAgeHours } from './services/nodeDisplaySettings.js';
 import { safeJson } from './utils/redactSecrets.js';
+import { resolveMeshtasticNodeNames } from '../utils/nodeHelpers.js';
 import type { DbNode } from '../db/types.js';
 
 const require = createRequire(import.meta.url);
@@ -827,12 +828,13 @@ export class VirtualNodeServer extends EventEmitter {
     // clients see the user-set custom location instead of stale device GPS
     // (issue #2847).
     const effPos = getEffectiveDbNodePosition(node);
+    const names = resolveMeshtasticNodeNames(node.nodeNum, node.longName, node.shortName);
     return meshtasticProtobufService.createNodeInfo({
       nodeNum: node.nodeNum,
       user: {
         id: node.nodeId,
-        longName: node.longName || 'Unknown',
-        shortName: node.shortName || '????',
+        longName: names.longName,
+        shortName: names.shortName,
         hwModel: node.hwModel || 0,
         role: node.role ?? undefined,
         publicKey: node.publicKey ?? undefined,
@@ -873,14 +875,19 @@ export class VirtualNodeServer extends EventEmitter {
 
     const sourceId = this.config.meshtasticManager.sourceId;
     const localNode = await databaseService.nodes.getNode(localNodeInfo.nodeNum, sourceId) as DbNode | null;
+    const localNames = resolveMeshtasticNodeNames(
+      localNodeInfo.nodeNum,
+      localNodeInfo.longName,
+      localNodeInfo.shortName,
+    );
     const message = localNode
       ? await this.createNodeInfoFromDbNode(localNode)
       : await meshtasticProtobufService.createNodeInfo({
           nodeNum: localNodeInfo.nodeNum,
           user: {
             id: localNodeInfo.nodeId,
-            longName: localNodeInfo.longName || 'Unknown',
-            shortName: localNodeInfo.shortName || '????',
+            longName: localNames.longName,
+            shortName: localNames.shortName,
             hwModel: localNodeInfo.hwModel || 0,
           },
         });

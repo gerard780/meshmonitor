@@ -27,6 +27,26 @@ export const parseNodeId = (nodeId: string): number | null => {
   return isNaN(num) ? null : num;
 };
 
+/**
+ * Resolve the names that a Meshtastic client should see when a node has not
+ * advertised a User payload yet. Stock firmware derives the default short
+ * name from the last four hex digits of the node number and presents the long
+ * name as "Meshtastic <shortName>". Virtual-node responses should mirror that
+ * behavior instead of serializing literal Unknown/???? placeholders, which
+ * prevent clients such as iOS from applying their normal fallback display.
+ */
+export const resolveMeshtasticNodeNames = (
+  nodeNum: number,
+  longName: string | null | undefined,
+  shortName: string | null | undefined,
+): { longName: string; shortName: string } => {
+  const defaultShortName = (nodeNum >>> 0).toString(16).padStart(8, '0').slice(-4);
+  const resolvedShortName = shortName?.trim() ? shortName : defaultShortName;
+  const resolvedLongName = longName?.trim() ? longName : `Meshtastic ${resolvedShortName}`;
+
+  return { longName: resolvedLongName, shortName: resolvedShortName };
+};
+
 /** Largest valid Meshtastic node number (unsigned 32-bit). */
 const MAX_NODE_NUM = 0xffffffff;
 
