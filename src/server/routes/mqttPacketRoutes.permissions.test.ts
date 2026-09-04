@@ -94,6 +94,18 @@ describe('mqttPacketRoutes — per-source permission isolation', () => {
       expect(res.body.data).toHaveProperty('maxAgeHours');
     });
 
+    it('uses the hard query ceiling when count retention is unlimited', async () => {
+      await harness.db.settings.setSetting('mqtt_packet_log_max_count', '0');
+      const agent = await harness.loginAs(harness.limited);
+
+      const res = await agent.get(`/sources/${harness.sourceA}/mqtt/packets`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.maxCount).toBe(0);
+      expect(res.body.data.limit).toBe(1000);
+      expect(res.body.data.packets).toHaveLength(1);
+    });
+
     it('GET / on sourceB (no grant there) → denied — grant on sourceA does not open sourceB', async () => {
       const agent = await harness.loginAs(harness.limited);
       const res = await agent.get(`/sources/${harness.sourceB}/mqtt/packets`);

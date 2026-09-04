@@ -4422,8 +4422,11 @@ class DatabaseService {
     const maxCountStr = this.drizzleDbType === 'sqlite'
       ? this.getSetting('packet_log_max_count')
       : await this.getSettingAsync('packet_log_max_count');
-    const maxCount = maxCountStr ? parseInt(maxCountStr, 10) : 1000;
-    await this.packetLog.enforcePacketLogMaxCount(maxCount);
+    const parsedMaxCount = maxCountStr !== null ? parseInt(maxCountStr, 10) : NaN;
+    const maxCount = Number.isFinite(parsedMaxCount) && parsedMaxCount >= 0 ? parsedMaxCount : 1000;
+    if (maxCount > 0) {
+      await this.packetLog.enforcePacketLogMaxCount(maxCount);
+    }
     return id;
   }
 
@@ -4485,7 +4488,9 @@ class DatabaseService {
   async cleanupOldPacketLogsAsync(): Promise<number> {
     if (!this.packetLogRepo) return 0;
     const maxAgeHoursStr = this.getSetting('packet_log_max_age_hours');
-    const maxAgeHours = maxAgeHoursStr ? parseInt(maxAgeHoursStr, 10) : 24;
+    const parsedMaxAgeHours = maxAgeHoursStr !== null ? parseInt(maxAgeHoursStr, 10) : NaN;
+    const maxAgeHours = Number.isFinite(parsedMaxAgeHours) && parsedMaxAgeHours >= 0 ? parsedMaxAgeHours : 24;
+    if (maxAgeHours === 0) return 0;
     return this.packetLogRepo.cleanupOldPacketLogs(maxAgeHours);
   }
 

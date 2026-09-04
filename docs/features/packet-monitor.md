@@ -178,7 +178,12 @@ from the banner shown when capture is off, or from the filter panel (requires
 `settings:write`). Capture is controlled by the `mqtt_packet_log_enabled` setting,
 with retention governed by `mqtt_packet_log_max_count` (default 5000 rows — higher
 than the other monitors because each row is one gateway reception, not one packet)
-and `mqtt_packet_log_max_age_hours` (default 24 hours).
+and `mqtt_packet_log_max_age_hours` (default 24 hours). Set either retention value
+to `0` to disable that cleanup criterion. For example, count `0` with age `24`
+keeps any number of rows for 24 hours; setting both to `0` retains packets
+indefinitely. Meshtastic and MeshCore packet monitors use the same zero-is-unlimited
+semantics for their count and age settings. When both limits are zero, monitor disk
+usage because the packet-log tables can grow without bound.
 
 ### Encrypted, ignored, and geo-ignored copies are still captured
 

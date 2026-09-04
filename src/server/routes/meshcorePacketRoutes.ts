@@ -50,13 +50,15 @@ router.get(
     try {
       const sourceId = (req.params as { id?: string }).id!;
       const offset = Math.max(parseInt(req.query.offset as string, 10) || 0, 0);
-      // Honor the user-configured retention cap (meshcore_packet_log_max_count)
-      // as the default effective limit, the same way the export endpoint does
-      // (issue #3690). An explicit client-supplied `limit` still wins so a
-      // caller can request fewer rows; both are clamped by the hard ceiling.
+      // Honor a positive retention cap as the default effective limit. Zero
+      // means unlimited storage, so it falls back to the hard query ceiling.
+      // An explicit client-supplied `limit` still wins; all paths remain
+      // clamped by the hard ceiling (issue #3690).
       const maxCount = await meshcorePacketLogService.getMaxCount();
       const requestedLimit = parseInt(req.query.limit as string, 10);
-      const effectiveLimit = Number.isFinite(requestedLimit) && requestedLimit > 0 ? requestedLimit : maxCount;
+      const effectiveLimit = Number.isFinite(requestedLimit) && requestedLimit > 0
+        ? requestedLimit
+        : (maxCount > 0 ? maxCount : MESHCORE_PACKET_MAX_LIMIT);
       const limit = Math.min(Math.max(effectiveLimit, 1), MESHCORE_PACKET_MAX_LIMIT);
       const payloadType = req.query.payload_type !== undefined ? parseInt(req.query.payload_type as string, 10) : undefined;
       const routeType = req.query.route_type !== undefined ? parseInt(req.query.route_type as string, 10) : undefined;
@@ -249,12 +251,15 @@ router.get(
       // Accept seconds or milliseconds (mirror the list endpoint).
       if (since !== undefined && since < 1e12) since = since * 1000;
 
-      // Export every retained packet matching the filters (up to the cap).
+      // Export matching packets up to the retention or hard query cap.
       const maxCount = await meshcorePacketLogService.getMaxCount();
+      const exportLimit = maxCount > 0
+        ? Math.min(maxCount, MESHCORE_PACKET_MAX_LIMIT)
+        : MESHCORE_PACKET_MAX_LIMIT;
       const packets = await meshcorePacketLogService.getPackets({
         sourceId,
         offset: 0,
-        limit: maxCount,
+        limit: exportLimit,
         payloadType: Number.isFinite(payloadType as number) ? payloadType : undefined,
         routeType: Number.isFinite(routeType as number) ? routeType : undefined,
         since: Number.isFinite(since as number) ? since : undefined,

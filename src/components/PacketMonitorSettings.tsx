@@ -48,7 +48,7 @@ const PacketMonitorSettings: React.FC<PacketMonitorSettingsProps> = ({
         <input
           id="packet-max-count"
           type="number"
-          min="100"
+          min="0"
           max="10000"
           step="100"
           value={maxCount}
@@ -68,7 +68,7 @@ const PacketMonitorSettings: React.FC<PacketMonitorSettingsProps> = ({
         <input
           id="packet-max-age"
           type="number"
-          min="1"
+          min="0"
           max="168"
           value={maxAgeHours}
           onChange={(e) => onMaxAgeHoursChange(parseInt(e.target.value, 10))}
@@ -79,7 +79,10 @@ const PacketMonitorSettings: React.FC<PacketMonitorSettingsProps> = ({
 
       <div className="packet-monitor-info">
         <p className="setting-description">
-          <strong>{t('packet_monitor.settings.storage_estimate')}:</strong> {t('packet_monitor.settings.storage_value', { count: maxCount, size: Math.round(maxCount * 0.5 / 1024) })}
+          <strong>{t('packet_monitor.settings.storage_estimate')}:</strong>{' '}
+          {maxCount === 0
+            ? t('common.unlimited', 'Unlimited')
+            : t('packet_monitor.settings.storage_value', { count: maxCount, size: Math.round(maxCount * 0.5 / 1024) })}
         </p>
         <p className="setting-description">
           <strong>{t('packet_monitor.settings.note')}:</strong> {t('packet_monitor.settings.cleanup_note')}

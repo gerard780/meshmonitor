@@ -245,6 +245,28 @@ describe('mqttPacketLogService — ok_to_mqtt violation writes (#4114)', () => {
     expect(await countViolations()).toBe(2);
   });
 
+  it('keeps packet rows when both packet retention limits are zero', async () => {
+    settingsStore['mqtt_packet_log_max_age_hours'] = '0';
+    settingsStore['mqtt_packet_log_max_count'] = '0';
+
+    const now = Date.now();
+    await mqttPacketLogRepo.insertPacket({
+      sourceId: 'src-a',
+      packetId: 10,
+      fromNode: 1,
+      gatewayId: '!aaaaaaaa',
+      timestamp: now - 365 * 24 * 60 * 60 * 1000,
+      encrypted: 0,
+      ingestOutcome: 'ingested',
+      okToMqttViolation: 0,
+      createdAt: now,
+    });
+
+    await mqttPacketLogService.runCleanup();
+
+    expect(await mqttPacketLogRepo.getPacketCount({ sourceId: 'src-a' })).toBe(1);
+  });
+
   it('retention immunity: violation rows survive mqttPacketLog.deletePacketsOlderThan + deleteAllPackets', async () => {
     const env = envelope({ gatewayId: '!22222222', fromNode: ORIGINATOR_NUM, bitfield: 0 });
     settingsStore['mqtt_packet_log_enabled'] = '1';

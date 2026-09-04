@@ -44,7 +44,7 @@ export interface MaintenanceStatus {
   };
 }
 
-/** Minimum allowed retention days to prevent accidental data wipe */
+/** Minimum positive retention. Zero explicitly disables that cleanup. */
 const MIN_RETENTION_DAYS = 1;
 
 /**
@@ -118,10 +118,12 @@ class DatabaseMaintenanceService {
   }
 
   /**
-   * Get a retention setting from the database, with default and minimum enforcement
+   * Get a retention setting from the database. Zero means unlimited; invalid
+   * negative values are still clamped to the minimum positive retention.
    */
   private async getRetentionDays(key: string, defaultDays: number = 30): Promise<number> {
     const value = parseInt(await databaseService.settings.getSetting(key) || String(defaultDays), 10);
+    if (value === 0) return 0;
     if (isNaN(value) || value < MIN_RETENTION_DAYS) {
       logger.warn(`⚠️ Retention setting "${key}" is ${value}, clamping to minimum ${MIN_RETENTION_DAYS} day(s)`);
       return MIN_RETENTION_DAYS;
@@ -217,7 +219,7 @@ class DatabaseMaintenanceService {
     };
 
     try {
-      // Get retention settings (defaults: 30 days, minimum: 1 day)
+      // Get retention settings (defaults: 30 days; 0 disables each cleanup)
       const [messageRetention, tracerouteRetention, routeSegmentRetention, neighborInfoRetention] =
         await Promise.all([
           this.getRetentionDays('messageRetentionDays'),
@@ -226,29 +228,38 @@ class DatabaseMaintenanceService {
           this.getRetentionDays('neighborInfoRetentionDays'),
         ]);
 
-      logger.debug(`🔧 Running database maintenance with retention: messages=${messageRetention}d, traceroutes=${tracerouteRetention}d, routeSegments=${routeSegmentRetention}d, neighborInfo=${neighborInfoRetention}d`);
+      const retentionLabel = (days: number) => days === 0 ? 'unlimited' : `${days}d`;
+      logger.debug(`🔧 Running database maintenance with retention: messages=${retentionLabel(messageRetention)}, traceroutes=${retentionLabel(tracerouteRetention)}, routeSegments=${retentionLabel(routeSegmentRetention)}, neighborInfo=${retentionLabel(neighborInfoRetention)}`);
 
       // Get database size before cleanup
       stats.sizeBefore = await databaseService.getDatabaseSizeAsync();
       logger.debug(`📊 Database size before: ${formatBytes(stats.sizeBefore)}`);
 
       // Run cleanups
-      stats.messagesDeleted = await databaseService.cleanupOldMessagesAsync(messageRetention);
+      if (messageRetention > 0) {
+        stats.messagesDeleted = await databaseService.cleanupOldMessagesAsync(messageRetention);
+      }
       if (stats.messagesDeleted > 0) {
         logger.info(`🗑️ Deleted ${stats.messagesDeleted} old messages`);
       }
 
-      stats.traceroutesDeleted = await databaseService.cleanupOldTraceroutesAsync(tracerouteRetention);
+      if (tracerouteRetention > 0) {
+        stats.traceroutesDeleted = await databaseService.cleanupOldTraceroutesAsync(tracerouteRetention);
+      }
       if (stats.traceroutesDeleted > 0) {
         logger.info(`🗑️ Deleted ${stats.traceroutesDeleted} old traceroutes`);
       }
 
-      stats.routeSegmentsDeleted = await databaseService.cleanupOldRouteSegmentsAsync(routeSegmentRetention);
+      if (routeSegmentRetention > 0) {
+        stats.routeSegmentsDeleted = await databaseService.cleanupOldRouteSegmentsAsync(routeSegmentRetention);
+      }
       if (stats.routeSegmentsDeleted > 0) {
         logger.info(`🗑️ Deleted ${stats.routeSegmentsDeleted} old route segments`);
       }
 
-      stats.neighborInfoDeleted = await databaseService.cleanupOldNeighborInfoAsync(neighborInfoRetention);
+      if (neighborInfoRetention > 0) {
+        stats.neighborInfoDeleted = await databaseService.cleanupOldNeighborInfoAsync(neighborInfoRetention);
+      }
       if (stats.neighborInfoDeleted > 0) {
         logger.info(`🗑️ Deleted ${stats.neighborInfoDeleted} old neighbor info records`);
       }
