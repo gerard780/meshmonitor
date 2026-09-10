@@ -2,9 +2,20 @@ import { Server, Socket } from 'net';
 import { EventEmitter } from 'events';
 import { logger } from '../utils/logger.js';
 import databaseService from '../services/database.js';
-import type { MeshCoreNode, TelemetryMode, MeshCoreContact, MeshCoreMessage, MeshCoreStatus, MeshCoreLoginResult } from './meshcoreManager.js';
+import type {
+  MeshCoreNode,
+  TelemetryMode,
+  MeshCoreContact,
+  MeshCoreMessage,
+  MeshCoreStatus,
+  MeshCoreLoginResult,
+  MeshCoreStatsCore,
+  MeshCoreStatsRadio,
+  MeshCoreStatsPackets,
+} from './meshcoreManager.js';
 import {
   CommandCodes,
+  StatsTypes,
   ErrorCodes,
   SUPPORTED_COMPANION_PROTOCOL_VERSION,
   parseAppFrames,
@@ -17,6 +28,9 @@ import {
   encodeEndOfContacts,
   encodeChannelInfo,
   encodeBatteryVoltage,
+  encodeStatsCore,
+  encodeStatsRadio,
+  encodeStatsPackets,
   encodeContactMsgRecv,
   encodeChannelMsgRecv,
   encodeMsgWaitingPush,
@@ -39,6 +53,7 @@ import {
   mhzToWireFreq,
   khzToWireBw,
   parseSetAdvertName,
+  parseAddUpdateContactFavorite,
   parseSetRadioParams,
   parseSetTxPower,
   parseSetAdvertLatLon,
@@ -70,6 +85,10 @@ export interface MeshCoreVirtualNodeManager {
   isConnected(): boolean;
   getLocalNode(): MeshCoreNode | null;
   getContacts(): MeshCoreContact[];
+  /** Read local Companion counters/state. These calls do not transmit over RF. */
+  getStatsCore(): Promise<MeshCoreStatsCore | null>;
+  getStatsRadio(): Promise<MeshCoreStatsRadio | null>;
+  getStatsPackets(): Promise<MeshCoreStatsPackets | null>;
   /**
    * True when this source is configured strictly receive-only (#4547). Sync and
    * cached on the manager — no DB read on the command path. The server refuses
@@ -92,6 +111,8 @@ export interface MeshCoreVirtualNodeManager {
   // (issue #3904). Units match the manager's own methods: freq MHz, bw kHz,
   // lat/lon decimal degrees. Return false / throw on failure.
   setName(name: string): Promise<boolean>;
+  /** Persist and apply the physical contact favourite bit (local serial write, no RF). */
+  setContactFavoriteFromVirtualNode(publicKey: string, isFavorite: boolean): Promise<boolean>;
   setRadio(freq: number, bw: number, sf: number, cr: number): Promise<boolean>;
   setTxPower(power: number): Promise<boolean>;
   setCoords(lat: number, lon: number): Promise<boolean>;
@@ -573,6 +594,9 @@ export class MeshCoreVirtualNodeServer extends EventEmitter {
         case CommandCodes.GetBatteryVoltage:
           this.handleGetBatteryVoltage(clientId);
           break;
+        case CommandCodes.GetStats:
+          void this.handleGetStats(clientId, command);
+          break;
         case CommandCodes.SyncNextMessage:
           this.handleSyncNextMessage(clientId);
           break;
@@ -635,6 +659,15 @@ export class MeshCoreVirtualNodeServer extends EventEmitter {
           void this.handleConfigCommand(clientId, command, () => {
             const { name } = parseSetAdvertName(command.payload);
             return this.options.manager.setName(name);
+          });
+          break;
+        case CommandCodes.AddUpdateContact:
+          // The mobile app sends the full contact record to toggle flags bit 0.
+          // Re-read/update through the manager so stale app fields cannot
+          // overwrite the physical node's current route or permission bits.
+          void this.handleConfigCommand(clientId, command, () => {
+            const { publicKey, favorite } = parseAddUpdateContactFavorite(command.payload);
+            return this.options.manager.setContactFavoriteFromVirtualNode(publicKey, favorite);
           });
           break;
         case CommandCodes.SetRadioParams:
@@ -1160,18 +1193,24 @@ export class MeshCoreVirtualNodeServer extends EventEmitter {
     // must use to talk to us — NOT the proxied node's firmware version. We only
     // implement v1 frames, so this MUST always be SUPPORTED_COMPANION_PROTOCOL_VERSION.
     //
-    // Leaking the real node's `firmwareVer` here (once the manager's background
-    // deviceQuery() has cached it) makes the meshcore-flutter app abort the
+    // Leaking the real node's numeric `firmwareVer` here (once the manager's
+    // background deviceQuery() has cached it) makes the meshcore-flutter app abort the
     // handshake: it sends DeviceQuery *before* AppStart, and on seeing a version
     // it can't reconcile with our v1 wire format it never sends AppStart and
     // drops the socket after ~5s. Before the cache is warm we fell back to v1
     // and the app connected — which is exactly the "works once after restart,
-    // then never again" symptom (issue #3705). Build date / model are display
-    // strings and stay real so the app shows a faithful identity.
+    // then never again" symptom (issue #3705).
+    //
+    // Real companion firmware appends its semantic release after the model as
+    // `model\0version`. The Flutter app uses that separate string for firmware
+    // feature gates (including GetStats / Noise Floor, introduced in v1.11.0),
+    // so preserve it without changing the v1 protocol byte above.
+    const model = localNode?.model || 'MeshMonitor Virtual Node';
+    const version = localNode?.ver?.trim();
     this.send(clientId, encodeDeviceInfo({
       firmwareVer: SUPPORTED_COMPANION_PROTOCOL_VERSION,
       firmwareBuildDate: localNode?.firmwareBuild ?? '',
-      manufacturerModel: localNode?.model || 'MeshMonitor Virtual Node',
+      manufacturerModel: version ? `${model}\0${version}` : model,
     }));
   }
 
@@ -1187,7 +1226,7 @@ export class MeshCoreVirtualNodeServer extends EventEmitter {
       this.send(clientId, encodeContact({
         publicKey: pubKeyHexToBytes(c.publicKey),
         type: c.advType ?? 1,
-        flags: 0,
+        flags: c.flags ?? (c.deviceFavorite ? 0x01 : 0),
         // OUT_PATH_UNKNOWN (-1) when no cached route, else the hop count.
         outPathLen: c.pathLen == null ? -1 : c.pathLen,
         outPath: c.outPath ? hexToBytes(c.outPath) : Buffer.alloc(0),
@@ -1225,6 +1264,39 @@ export class MeshCoreVirtualNodeServer extends EventEmitter {
   private handleGetBatteryVoltage(clientId: string): void {
     const mv = this.options.manager.getLocalNode()?.batteryMv ?? 0;
     this.send(clientId, encodeBatteryVoltage(mv));
+  }
+
+  /**
+   * GetStats(56): relay local Companion core/radio/packet counters as a
+   * Stats(24) response. Unlike SendStatusReq, this reads the attached radio
+   * itself and never transmits over RF, so receive-only/admin gates do not
+   * apply. A malformed/unknown sub-type mirrors firmware with IllegalArg;
+   * an unavailable physical-node result is BadState.
+   */
+  private async handleGetStats(clientId: string, command: ParsedCommand): Promise<void> {
+    const type = command.statsType;
+    if (type !== StatsTypes.Core && type !== StatsTypes.Radio && type !== StatsTypes.Packets) {
+      this.send(clientId, encodeErr(ErrorCodes.IllegalArg));
+      return;
+    }
+
+    try {
+      if (type === StatsTypes.Core) {
+        const stats = await this.options.manager.getStatsCore();
+        this.send(clientId, stats ? encodeStatsCore(stats) : encodeErr(ErrorCodes.BadState));
+      } else if (type === StatsTypes.Radio) {
+        const stats = await this.options.manager.getStatsRadio();
+        this.send(clientId, stats ? encodeStatsRadio(stats) : encodeErr(ErrorCodes.BadState));
+      } else {
+        const stats = await this.options.manager.getStatsPackets();
+        this.send(clientId, stats ? encodeStatsPackets(stats) : encodeErr(ErrorCodes.BadState));
+      }
+    } catch (err) {
+      logger.warn(
+        `[MeshCore VN ${this.sourceId}] GetStats(${type}) from ${clientId} failed: ${(err as Error).message}`,
+      );
+      this.send(clientId, encodeErr(ErrorCodes.BadState));
+    }
   }
 
   /** SyncNextMessage → next queued incoming message, or NoMoreMessages. */

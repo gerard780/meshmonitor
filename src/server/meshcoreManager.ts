@@ -1287,6 +1287,16 @@ class MeshCoreManager extends EventEmitter implements ISourceManager {
 
       // Get initial info
       await this.refreshLocalNode();
+      // DeviceInfo is a separate Companion command from SelfInfo. Fetch it
+      // before starting the Virtual Node so the very first app DeviceQuery can
+      // advertise the real `model\0version` identity. Waiting for the 5-minute
+      // telemetry poll leaves the semantic version unset during the app
+      // handshake, which makes firmware-gated features such as Noise Floor
+      // incorrectly show "v1.11.0+ required" even on newer radios.
+      if (this.deviceType === MeshCoreDeviceType.COMPANION) {
+        const deviceInfo = await this.deviceQuery();
+        if (deviceInfo) this.applyDeviceInfo(deviceInfo);
+      }
       // Pre-seed the in-memory contact list from the DB BEFORE the live
       // get_contacts. On a flaky/slow companion the live refresh can return
       // empty or time out (and refreshContacts deliberately won't wipe on
@@ -6595,6 +6605,17 @@ class MeshCoreManager extends EventEmitter implements ISourceManager {
   }
 
   /**
+   * Apply a favourite toggle received through the Companion Virtual Node.
+   * Unlike the web/API path above, the connected app expects the command ack
+   * to reflect the physical write, so return false when it could not be
+   * applied. The local favourite is still persisted for reconciliation.
+   */
+  async setContactFavoriteFromVirtualNode(publicKey: string, isFavorite: boolean): Promise<boolean> {
+    await databaseService.meshcore.setNodeFavorite(this.sourceId, publicKey, isFavorite);
+    return this.pushFavoriteToDevice(publicKey, isFavorite);
+  }
+
+  /**
    * Set/clear the firmware favourite bit (ContactInfo.flags bit 0) for a
    * contact via the `set_contact_favorite` bridge command. Companion-only and
    * best-effort — logs and returns false on any failure rather than throwing,
@@ -6618,7 +6639,11 @@ class MeshCoreManager extends EventEmitter implements ISourceManager {
       // Keep the in-memory device-favourite mirror in step so the next
       // reconcile doesn't re-push a change we just made.
       const contact = this.contacts.get(publicKey);
-      if (contact) contact.deviceFavorite = isFavorite;
+      if (contact) {
+        contact.deviceFavorite = isFavorite;
+        const currentFlags = contact.flags ?? 0;
+        contact.flags = isFavorite ? (currentFlags | 0x01) : (currentFlags & ~0x01);
+      }
       return true;
     } catch (err) {
       logger.warn(
