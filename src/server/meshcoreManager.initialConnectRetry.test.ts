@@ -57,7 +57,15 @@ describe('MeshCoreManager.connect() initial-failure retry', () => {
     // Pretend a prior failed attempt already armed the retry flag.
     (m as any).shouldReconnect = true;
     (m as any).startNativeBackend = vi.fn().mockResolvedValue(undefined);
-    (m as any).refreshLocalNode = vi.fn().mockResolvedValue(undefined);
+    (m as any).refreshLocalNode = vi.fn().mockImplementation(async () => {
+      (m as any).localNode = { publicKey: 'ab'.repeat(32), name: 'Test Companion' };
+    });
+    const deviceQuerySpy = vi.spyOn(m, 'deviceQuery').mockResolvedValue({
+      firmwareVer: 1,
+      firmwareBuild: '25-Jun-2026',
+      model: 'Heltec V3',
+      ver: 'v1.17.1',
+    });
     (m as any).seedContactsFromDb = vi.fn().mockResolvedValue(undefined);
     (m as any).refreshContacts = vi.fn().mockResolvedValue(undefined);
     (m as any).refreshKnownScopes = vi.fn().mockResolvedValue(undefined);
@@ -71,6 +79,11 @@ describe('MeshCoreManager.connect() initial-failure retry', () => {
 
     expect(ok).toBe(true);
     expect((m as any).shouldReconnect).toBe(false);
+    expect(deviceQuerySpy).toHaveBeenCalledOnce();
+    expect(m.getLocalNode()).toMatchObject({ model: 'Heltec V3', ver: 'v1.17.1' });
+    expect(deviceQuerySpy.mock.invocationCallOrder[0]).toBeLessThan(
+      (m as any).startVirtualNodeServer.mock.invocationCallOrder[0],
+    );
   });
 
   it('retries the eventual reconnect attempt via attemptReconnect once scheduled', async () => {

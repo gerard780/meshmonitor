@@ -68,6 +68,13 @@ export const CommandCodes = {
   GetStats: 56,
 } as const;
 
+/** Sub-type byte carried by GetStats(56) / Stats(24). */
+export const StatsTypes = {
+  Core: 0,
+  Radio: 1,
+  Packets: 2,
+} as const;
+
 /** Response codes the node sends back (subset). */
 export const ResponseCodes = {
   Ok: 0,
@@ -86,6 +93,7 @@ export const ResponseCodes = {
   PrivateKey: 14,
   Disabled: 15,
   ChannelInfo: 18,
+  Stats: 24,
 } as const;
 
 /** Push codes the node emits on live events (subset). */
@@ -156,6 +164,7 @@ export interface ParsedCommand {
   appName?: string;
   appTargetVer?: number;
   channelIdx?: number;
+  statsType?: number;
   // Send-message fields (SendTxtMsg / SendChannelTxtMsg).
   txtType?: number;
   senderTimestamp?: number;
@@ -223,6 +232,11 @@ export function decodeCommand(payload: Buffer): ParsedCommand {
       if (payload.length >= 2) cmd.channelIdx = payload[1];
       break;
     }
+    case CommandCodes.GetStats: {
+      // [code][statsType:u8] — 0=core, 1=radio, 2=packets.
+      if (payload.length >= 2) cmd.statsType = payload[1];
+      break;
+    }
     case CommandCodes.SendTxtMsg: {
       // [code][txtType:u8][attempt:u8][senderTimestamp:u32 LE][pubKeyPrefix:6][text…]
       if (payload.length >= 13) {
@@ -265,6 +279,7 @@ export function decodeCommand(payload: Buffer): ParsedCommand {
 // node rejects surfaces to the app as Err(BadState), not a crash here.
 
 export interface SetAdvertNameCmd { name: string; }
+export interface AddUpdateContactFavoriteCmd { publicKey: string; favorite: boolean; flags: number; }
 export interface SendLoginCmd { publicKey: string; password: string; }
 export interface SendTracePathCmd { tag: number; auth: number; flags: number; path: Buffer; }
 export interface SendTelemetryReqCmd { publicKey: string; }
@@ -316,6 +331,28 @@ export interface SetOtherParamsCmd {
  */
 export function parseSetAdvertName(payload: Buffer): SetAdvertNameCmd {
   return { name: payload.subarray(1).toString('utf8') };
+}
+
+/**
+ * AddUpdateContact(9):
+ * `[code][publicKey:32][type:u8][flags:u8][outPathLen:u8][outPath:64]`
+ * `[advName:cstring(32)][lastAdvert:u32LE][advLat:i32LE][advLon:i32LE]`.
+ *
+ * The mobile app uses this full-record command when toggling a contact's
+ * favourite flag (flags bit 0). The Virtual Node deliberately extracts only
+ * that bit and lets MeshCoreManager perform a read-modify-write against the
+ * physical contact, preserving its current path/name/telemetry permission
+ * bits rather than trusting a potentially stale record from the app.
+ */
+export function parseAddUpdateContactFavorite(payload: Buffer): AddUpdateContactFavoriteCmd {
+  const expectedLength = 1 + 32 + 1 + 1 + 1 + 64 + 32 + 4 + 4 + 4;
+  if (payload.length < expectedLength) throw new Error('AddUpdateContact: short payload');
+  const flags = payload[34];
+  return {
+    publicKey: payload.subarray(1, 33).toString('hex'),
+    favorite: (flags & 0x01) !== 0,
+    flags,
+  };
 }
 
 /**
@@ -960,6 +997,82 @@ export function encodeNoMoreMessages(): Buffer {
   return Buffer.from([ResponseCodes.NoMoreMessages]);
 }
 
+/** Local Companion core counters returned by GetStats(Core). */
+export interface CoreStatsData {
+  batteryMv?: number;
+  uptimeSecs?: number;
+  errors?: number;
+  queueLen?: number;
+}
+
+/** Encode Stats(24, Core) using the current Companion firmware layout. */
+export function encodeStatsCore(s: CoreStatsData): Buffer {
+  const b = Buffer.alloc(1 + 1 + 2 + 4 + 2 + 1);
+  let o = 0;
+  b[o++] = ResponseCodes.Stats;
+  b[o++] = StatsTypes.Core;
+  b.writeUInt16LE(clampUInt16(s.batteryMv ?? 0), o); o += 2;
+  b.writeUInt32LE(toUInt32(s.uptimeSecs ?? 0), o); o += 4;
+  b.writeUInt16LE(clampUInt16(s.errors ?? 0), o); o += 2;
+  b[o] = clampUInt8(s.queueLen ?? 0);
+  return b;
+}
+
+/** Local Companion radio counters returned by GetStats(Radio). */
+export interface RadioStatsData {
+  noiseFloor?: number;
+  lastRssi?: number;
+  lastSnr?: number;
+  txAirSecs?: number;
+  rxAirSecs?: number;
+}
+
+/** Encode Stats(24, Radio); SNR is converted from dB to the wire's quarter-dB byte. */
+export function encodeStatsRadio(s: RadioStatsData): Buffer {
+  const b = Buffer.alloc(1 + 1 + 2 + 1 + 1 + 4 + 4);
+  let o = 0;
+  b[o++] = ResponseCodes.Stats;
+  b[o++] = StatsTypes.Radio;
+  b.writeInt16LE(clampInt16(s.noiseFloor ?? 0), o); o += 2;
+  b.writeInt8(clampInt8(s.lastRssi ?? 0), o); o += 1;
+  b.writeInt8(clampInt8(Math.round((s.lastSnr ?? 0) * 4)), o); o += 1;
+  b.writeUInt32LE(toUInt32(s.txAirSecs ?? 0), o); o += 4;
+  b.writeUInt32LE(toUInt32(s.rxAirSecs ?? 0), o);
+  return b;
+}
+
+/** Local Companion packet counters returned by GetStats(Packets). */
+export interface PacketStatsData {
+  recv?: number;
+  sent?: number;
+  floodTx?: number;
+  directTx?: number;
+  floodRx?: number;
+  directRx?: number;
+  recvErrors?: number | null;
+}
+
+/** Encode Stats(24, Packets), including the current firmware's trailing RX-error counter. */
+export function encodeStatsPackets(s: PacketStatsData): Buffer {
+  const b = Buffer.alloc(1 + 1 + (7 * 4));
+  let o = 0;
+  b[o++] = ResponseCodes.Stats;
+  b[o++] = StatsTypes.Packets;
+  for (const value of [
+    s.recv,
+    s.sent,
+    s.floodTx,
+    s.directTx,
+    s.floodRx,
+    s.directRx,
+    s.recvErrors,
+  ]) {
+    b.writeUInt32LE(toUInt32(value ?? 0), o);
+    o += 4;
+  }
+  return b;
+}
+
 /** Encode an Ok(0) response. */
 export function encodeOk(): Buffer {
   return Buffer.from([ResponseCodes.Ok]);
@@ -1028,6 +1141,24 @@ function clampInt8(v: number): number {
 function clampInt16(v: number): number {
   if (!Number.isFinite(v)) return 0;
   return Math.max(-32768, Math.min(32767, Math.trunc(v)));
+}
+
+/** Clamp a number to the unsigned-8-bit range. */
+function clampUInt8(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  return Math.max(0, Math.min(0xff, Math.trunc(v)));
+}
+
+/** Clamp a number to the unsigned-16-bit range. */
+function clampUInt16(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  return Math.max(0, Math.min(0xffff, Math.trunc(v)));
+}
+
+/** Normalize a number to the protocol's unsigned-32-bit counter representation. */
+function toUInt32(v: number): number {
+  if (!Number.isFinite(v) || v <= 0) return 0;
+  return Math.min(0xffff_ffff, Math.trunc(v)) >>> 0;
 }
 
 /** Convert a hex public-key string to a 32-byte buffer (tolerant of `0x`/odd input). */

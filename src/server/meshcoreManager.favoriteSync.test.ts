@@ -118,6 +118,26 @@ describe('MeshCoreManager favourite ↔ device sync', () => {
     });
   });
 
+  describe('setContactFavoriteFromVirtualNode', () => {
+    it('returns physical success and updates the cached flags bit', async () => {
+      const { m, p } = makeCompanion(true);
+      p.contacts.set(KEY_A, { publicKey: KEY_A, flags: 0xa4, deviceFavorite: false });
+
+      await expect(m.setContactFavoriteFromVirtualNode(KEY_A, true)).resolves.toBe(true);
+
+      expect(dbSetNodeFavorite).toHaveBeenCalledWith('src-a', KEY_A, true);
+      expect(p.contacts.get(KEY_A)).toMatchObject({ flags: 0xa5, deviceFavorite: true });
+    });
+
+    it('returns false when the physical contact update fails', async () => {
+      const { m, p } = makeCompanion(true);
+      p.sendBridgeCommand = vi.fn().mockResolvedValue({ success: false, error: 'rejected' }) as unknown as Private['sendBridgeCommand'];
+
+      await expect(m.setContactFavoriteFromVirtualNode(KEY_A, true)).resolves.toBe(false);
+      expect(dbSetNodeFavorite).toHaveBeenCalledWith('src-a', KEY_A, true);
+    });
+  });
+
   describe('reconcileDeviceFavorites', () => {
     it('mirrors a device-side favourite into the local column (additive)', async () => {
       const { p, bridge } = makeCompanion(true);

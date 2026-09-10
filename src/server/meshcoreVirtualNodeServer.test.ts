@@ -5,6 +5,7 @@ import { Connection, Constants } from '@liamcottle/meshcore.js';
 import { MeshCoreVirtualNodeServer, type MeshCoreVirtualNodeManager } from './meshcoreVirtualNodeServer.js';
 import {
   CommandCodes,
+  StatsTypes,
   ResponseCodes,
   ErrorCodes,
   PushCodes,
@@ -54,6 +55,7 @@ const SAMPLE_CONTACTS: MeshCoreContact[] = [
     lastSeen: 1_750_000_500,
     pathLen: 2,
     outPath: 'a3,7f',
+    flags: 0xa5,
   },
 ];
 
@@ -76,6 +78,7 @@ class FakeManager extends EventEmitter implements MeshCoreVirtualNodeManager {
   sendMessageWithResultMock = vi.fn().mockResolvedValue({ ok: true });
   // Config-mutation mocks (issue #3904).
   setNameMock = vi.fn().mockResolvedValue(true);
+  setContactFavoriteMock = vi.fn().mockResolvedValue(true);
   setRadioMock = vi.fn().mockResolvedValue(true);
   setTxPowerMock = vi.fn().mockResolvedValue(true);
   setCoordsMock = vi.fn().mockResolvedValue(true);
@@ -90,6 +93,17 @@ class FakeManager extends EventEmitter implements MeshCoreVirtualNodeManager {
   loginToNodeMock = vi.fn().mockResolvedValue({});
   tracePathRawMock = vi.fn().mockResolvedValue({ pathSnrs: [8, 12], lastSnr: 5.5, pathLen: 2, flags: 0 });
   requestRemoteTelemetryRawMock = vi.fn().mockResolvedValue(Buffer.from([0x01, 0x67, 0x00, 0xdc]));
+  getStatsCoreMock = vi.fn().mockResolvedValue({ batteryMv: 4100, uptimeSecs: 86400, errors: 5, queueLen: 3 });
+  getStatsRadioMock = vi.fn().mockResolvedValue({ noiseFloor: -113, lastRssi: -85, lastSnr: 5.25, txAirSecs: 500, rxAirSecs: 900 });
+  getStatsPacketsMock = vi.fn().mockResolvedValue({
+    recv: 1000,
+    sent: 900,
+    floodTx: 100,
+    directTx: 200,
+    floodRx: 300,
+    directRx: 400,
+    recvErrors: 7,
+  });
   requestNodeStatusMock = vi.fn().mockResolvedValue({
     batteryMv: 4100,
     queueLen: 3,
@@ -111,6 +125,12 @@ class FakeManager extends EventEmitter implements MeshCoreVirtualNodeManager {
   isConnected() { return this.localNode !== null; }
   getLocalNode() { return this.localNode; }
   getContacts() { return this.contacts; }
+  getStatsCore() { return this.getStatsCoreMock(); }
+  getStatsRadio() { return this.getStatsRadioMock(); }
+  getStatsPackets() { return this.getStatsPacketsMock(); }
+  setContactFavoriteFromVirtualNode(publicKey: string, isFavorite: boolean) {
+    return this.setContactFavoriteMock(publicKey, isFavorite) as Promise<boolean>;
+  }
   sendMessage(text: string, toPublicKey?: string, channelIdx?: number) {
     return this.sendMessageMock(text, toPublicKey, channelIdx) as Promise<boolean>;
   }
@@ -343,13 +363,19 @@ describe('MeshCoreVirtualNodeServer — Phase 0 handshake', () => {
     expect(payload.readInt8(1)).toBe(SUPPORTED_COMPANION_PROTOCOL_VERSION);
   });
 
-  it('pins DeviceInfo protocol version to v1 even when the real node reports a higher firmwareVer (regression #3705)', async () => {
+  it('pins DeviceInfo protocol version to v1 while preserving the real semantic firmware release (regression #3705)', async () => {
     // Once the manager's background deviceQuery() caches the real node's
     // firmware-version byte, that value must NOT leak into the VN's DeviceInfo
     // version field — the VN only speaks v1 frames, and the meshcore-flutter app
     // aborts the handshake (never sending AppStart) when it sees a version it
     // can't reconcile. Stand up a fresh server whose local node reports fw ver 7.
-    const realNode: MeshCoreNode = { ...LOCAL_NODE, firmwareVer: 7, firmwareBuild: '25-Jun-2026', model: 'Heltec V3' };
+    const realNode: MeshCoreNode = {
+      ...LOCAL_NODE,
+      firmwareVer: 7,
+      firmwareBuild: '25-Jun-2026',
+      model: 'Heltec V3',
+      ver: 'v1.17.1',
+    };
     const realManager = new FakeManager(realNode);
     const realServer = new MeshCoreVirtualNodeServer({ port: 0, manager: realManager, databaseService: CHANNELS_DB });
     await realServer.start();
@@ -360,6 +386,12 @@ describe('MeshCoreVirtualNodeServer — Phase 0 handshake', () => {
       expect(payload[0]).toBe(ResponseCodes.DeviceInfo);
       expect(payload.readInt8(1)).toBe(SUPPORTED_COMPANION_PROTOCOL_VERSION);
       expect(payload.readInt8(1)).not.toBe(7);
+      const decoded = await new Promise<any>((resolve) => {
+        const conn: any = new (Connection as any)();
+        conn.once(ResponseCodes.DeviceInfo, (event: any) => resolve(event));
+        conn.onFrameReceived(new Uint8Array(payload));
+      });
+      expect(decoded.manufacturerModel).toBe('Heltec V3\0v1.17.1');
     } finally {
       realClient.close();
       await realServer.stop();
@@ -374,6 +406,7 @@ describe('MeshCoreVirtualNodeServer — Phase 0 handshake', () => {
     expect(contact[0]).toBe(ResponseCodes.Contact);
     // public key is the 32 bytes right after the response code
     expect(contact.subarray(1, 33).toString('hex')).toBe('b1'.repeat(32));
+    expect(contact[34]).toBe(0xa5); // preserve favourite + permission bits
     expect(end[0]).toBe(ResponseCodes.EndOfContacts);
   });
 
@@ -392,6 +425,57 @@ describe('MeshCoreVirtualNodeServer — Phase 0 handshake', () => {
   it('replies to GetBatteryVoltage with BatteryVoltage', async () => {
     const payload = await client.request([CommandCodes.GetBatteryVoltage]);
     expect(payload[0]).toBe(ResponseCodes.BatteryVoltage);
+  });
+
+  it('relays GetStats(Radio) with the physical Companion noise floor', async () => {
+    const payload = await client.request([CommandCodes.GetStats, StatsTypes.Radio]);
+    expect(manager.getStatsRadioMock).toHaveBeenCalledOnce();
+
+    const decoded = await new Promise<any>((resolve) => {
+      const conn: any = new (Connection as any)();
+      conn.once(ResponseCodes.Stats, (event: any) => resolve(event));
+      conn.onFrameReceived(new Uint8Array(payload));
+    });
+    expect(decoded.type).toBe(StatsTypes.Radio);
+    expect(decoded.data.noiseFloor).toBe(-113);
+    expect(decoded.data.lastRssi).toBe(-85);
+    expect(decoded.data.lastSnr).toBe(5.25);
+  });
+
+  it('relays GetStats(Core) and GetStats(Packets) with firmware-compatible layouts', async () => {
+    const core = await client.request([CommandCodes.GetStats, StatsTypes.Core]);
+    expect(core[0]).toBe(ResponseCodes.Stats);
+    expect(core[1]).toBe(StatsTypes.Core);
+    expect(core.readUInt16LE(2)).toBe(4100);
+    expect(core.readUInt32LE(4)).toBe(86400);
+    expect(core.readUInt16LE(8)).toBe(5);
+    expect(core[10]).toBe(3);
+
+    const packets = await client.request([CommandCodes.GetStats, StatsTypes.Packets]);
+    expect(packets[0]).toBe(ResponseCodes.Stats);
+    expect(packets[1]).toBe(StatsTypes.Packets);
+    expect(packets.readUInt32LE(2)).toBe(1000);
+    expect(packets.readUInt32LE(26)).toBe(7);
+    expect(manager.getStatsCoreMock).toHaveBeenCalledOnce();
+    expect(manager.getStatsPacketsMock).toHaveBeenCalledOnce();
+  });
+
+  it('rejects malformed or unknown GetStats sub-types with Err(IllegalArg)', async () => {
+    for (const frame of [[CommandCodes.GetStats], [CommandCodes.GetStats, 99]]) {
+      const payload = await client.request(frame);
+      expect(payload[0]).toBe(ResponseCodes.Err);
+      expect(payload[1]).toBe(ErrorCodes.IllegalArg);
+    }
+    expect(manager.getStatsCoreMock).not.toHaveBeenCalled();
+    expect(manager.getStatsRadioMock).not.toHaveBeenCalled();
+    expect(manager.getStatsPacketsMock).not.toHaveBeenCalled();
+  });
+
+  it('returns Err(BadState) when the physical Companion cannot supply stats', async () => {
+    manager.getStatsRadioMock.mockResolvedValueOnce(null);
+    const payload = await client.request([CommandCodes.GetStats, StatsTypes.Radio]);
+    expect(payload[0]).toBe(ResponseCodes.Err);
+    expect(payload[1]).toBe(ErrorCodes.BadState);
   });
 
   it('acknowledges SetFloodScope with Ok (read-only no-op)', async () => {
@@ -625,6 +709,15 @@ function setChannelFrame(idx: number, name: string, secret: Buffer): number[] {
   secret.copy(b, 34, 0, 16);
   return toNums(b);
 }
+function addUpdateContactFrame(publicKeyHex: string, flags: number): number[] {
+  const b = Buffer.alloc(144);
+  b[0] = CommandCodes.AddUpdateContact;
+  Buffer.from(publicKeyHex, 'hex').copy(b, 1, 0, 32);
+  b[33] = Constants.AdvType.Chat;
+  b[34] = flags;
+  b[35] = 0xff; // unknown path; remaining fixed fields may stay zero
+  return toNums(b);
+}
 const nameFrame = (name: string): number[] => [CommandCodes.SetAdvertName, ...Buffer.from(name, 'utf8')];
 function otherParamsFrame(manualAdd: number, base: number, loc: number, env: number, advLoc: number): number[] {
   const packed = (base & 0b11) | ((loc & 0b11) << 2) | ((env & 0b11) << 4);
@@ -655,6 +748,30 @@ describe('MeshCoreVirtualNodeServer — config-command forwarding (#3904)', () =
     const res = await client.request(nameFrame('Rover'));
     expect(res[0]).toBe(ResponseCodes.Ok);
     expect(manager.setNameMock).toHaveBeenCalledWith('Rover');
+  });
+
+  it('forwards AddUpdateContact favourite toggles without trusting stale contact fields', async () => {
+    await startWith(true);
+    const publicKey = 'c3'.repeat(32);
+    const res = await client.request(addUpdateContactFrame(publicKey, 0xa5));
+    expect(res[0]).toBe(ResponseCodes.Ok);
+    expect(manager.setContactFavoriteMock).toHaveBeenCalledWith(publicKey, true);
+  });
+
+  it('blocks AddUpdateContact when admin commands are disabled', async () => {
+    await startWith(false);
+    const res = await client.request(addUpdateContactFrame('c3'.repeat(32), 0x01));
+    expect(res[0]).toBe(ResponseCodes.Err);
+    expect(res[1]).toBe(ErrorCodes.UnsupportedCmd);
+    expect(manager.setContactFavoriteMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a short AddUpdateContact frame without changing a favourite', async () => {
+    await startWith(true);
+    const res = await client.request([CommandCodes.AddUpdateContact, 1, 2]);
+    expect(res[0]).toBe(ResponseCodes.Err);
+    expect(res[1]).toBe(ErrorCodes.IllegalArg);
+    expect(manager.setContactFavoriteMock).not.toHaveBeenCalled();
   });
 
   it('forwards SetRadioParams in manager units (MHz / kHz) and replies Ok', async () => {
@@ -1772,7 +1889,7 @@ describe('MeshCoreVirtualNodeServer — receive-only mode (#4547)', () => {
 
   // ── Read-path regression: the VN stays fully usable while receive-only ──
 
-  it('serves every read path normally while receive-only is ON (AppStart, contacts, channels, sync, config, PKI export)', async () => {
+  it('serves every read path normally while receive-only is ON (AppStart, contacts, channels, stats, sync, config, PKI export)', async () => {
     await startReceiveOnly({ allowAdminCommands: true, allowPkiExport: true });
 
     const appStart = await client.request([CommandCodes.AppStart, 1, 0, 0, 0, 0, 0, 0]);
@@ -1798,6 +1915,11 @@ describe('MeshCoreVirtualNodeServer — receive-only mode (#4547)', () => {
 
     const battery = await client.request([CommandCodes.GetBatteryVoltage]);
     expect(battery[0]).toBe(ResponseCodes.BatteryVoltage);
+
+    const stats = await client.request([CommandCodes.GetStats, StatsTypes.Radio]);
+    expect(stats[0]).toBe(ResponseCodes.Stats);
+    expect(stats[1]).toBe(StatsTypes.Radio);
+    expect(manager.getStatsRadioMock).toHaveBeenCalledOnce();
 
     const sync = await client.request([CommandCodes.SyncNextMessage]);
     expect(sync[0]).toBe(ResponseCodes.NoMoreMessages);

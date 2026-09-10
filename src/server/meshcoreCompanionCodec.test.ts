@@ -5,6 +5,7 @@ import { describe, it, expect } from 'vitest';
 import { Connection, Constants } from '@liamcottle/meshcore.js';
 import {
   CommandCodes,
+  StatsTypes,
   ResponseCodes,
   FRAME_APP_TO_NODE,
   FRAME_NODE_TO_APP,
@@ -26,6 +27,9 @@ import {
   encodeLoginSuccessPush,
   encodeLogRxData,
   encodeNoMoreMessages,
+  encodeStatsCore,
+  encodeStatsRadio,
+  encodeStatsPackets,
   encodePrivateKey,
   encodeDisabled,
   PushCodes,
@@ -37,6 +41,7 @@ import {
   wireFreqToMhz,
   wireBwToKhz,
   parseSetAdvertName,
+  parseAddUpdateContactFavorite,
   parseSetRadioParams,
   parseSetTxPower,
   parseSetAdvertLatLon,
@@ -72,10 +77,13 @@ describe('meshcoreCompanionCodec — constants stay in sync with meshcore.js', (
     expect(CommandCodes.AppStart).toBe(Constants.CommandCodes.AppStart);
     expect(CommandCodes.GetContacts).toBe(Constants.CommandCodes.GetContacts);
     expect(CommandCodes.SyncNextMessage).toBe(Constants.CommandCodes.SyncNextMessage);
+    expect(CommandCodes.GetStats).toBe(Constants.CommandCodes.GetStats);
+    expect(StatsTypes.Radio).toBe(Constants.StatsTypes.Radio);
     expect(ResponseCodes.SelfInfo).toBe(Constants.ResponseCodes.SelfInfo);
     expect(ResponseCodes.CurrTime).toBe(Constants.ResponseCodes.CurrTime);
     expect(ResponseCodes.DeviceInfo).toBe(Constants.ResponseCodes.DeviceInfo);
     expect(ResponseCodes.NoMoreMessages).toBe(Constants.ResponseCodes.NoMoreMessages);
+    expect(ResponseCodes.Stats).toBe(Constants.ResponseCodes.Stats);
   });
 
   it('LogRxData push code matches the library (#3963)', () => {
@@ -181,11 +189,15 @@ describe('meshcoreCompanionCodec — encoders round-trip through meshcore.js dec
   it('DeviceInfo decodes firmware version, build date and model', async () => {
     const decoded = await decodeWithMeshcore(
       ResponseCodes.DeviceInfo,
-      encodeDeviceInfo({ firmwareVer: 7, firmwareBuildDate: '19 Feb 2025', manufacturerModel: 'MeshMonitor Virtual Node' }),
+      encodeDeviceInfo({
+        firmwareVer: 7,
+        firmwareBuildDate: '19 Feb 2025',
+        manufacturerModel: 'MeshMonitor Virtual Node\0v1.17.1',
+      }),
     );
     expect(decoded.firmwareVer).toBe(7);
     expect(decoded.firmware_build_date).toBe('19 Feb 2025');
-    expect(decoded.manufacturerModel).toBe('MeshMonitor Virtual Node');
+    expect(decoded.manufacturerModel).toBe('MeshMonitor Virtual Node\0v1.17.1');
   });
 
   it('ContactsStart decodes the announced count', async () => {
@@ -202,6 +214,57 @@ describe('meshcoreCompanionCodec — encoders round-trip through meshcore.js dec
     const payload = encodeNoMoreMessages();
     expect(payload).toHaveLength(1);
     expect(payload[0]).toBe(ResponseCodes.NoMoreMessages);
+  });
+
+  it('Stats(Core) matches the current firmware layout including error flags', () => {
+    const payload = encodeStatsCore({ batteryMv: 4100, uptimeSecs: 86400, errors: 5, queueLen: 3 });
+    expect(payload).toHaveLength(11);
+    expect(payload[0]).toBe(ResponseCodes.Stats);
+    expect(payload[1]).toBe(StatsTypes.Core);
+    expect(payload.readUInt16LE(2)).toBe(4100);
+    expect(payload.readUInt32LE(4)).toBe(86400);
+    expect(payload.readUInt16LE(8)).toBe(5);
+    expect(payload[10]).toBe(3);
+  });
+
+  it('Stats(Radio) round-trips noise floor and signal/airtime counters through meshcore.js', async () => {
+    const decoded = await decodeWithMeshcore(
+      ResponseCodes.Stats,
+      encodeStatsRadio({ noiseFloor: -113, lastRssi: -85, lastSnr: 5.25, txAirSecs: 500, rxAirSecs: 900 }),
+    );
+    expect(decoded.type).toBe(StatsTypes.Radio);
+    expect(decoded.data).toEqual({
+      noiseFloor: -113,
+      lastRssi: -85,
+      lastSnr: 5.25,
+      txAirSecs: 500,
+      rxAirSecs: 900,
+    });
+  });
+
+  it('Stats(Packets) round-trips all counters through meshcore.js', async () => {
+    const decoded = await decodeWithMeshcore(
+      ResponseCodes.Stats,
+      encodeStatsPackets({
+        recv: 1000,
+        sent: 900,
+        floodTx: 100,
+        directTx: 200,
+        floodRx: 300,
+        directRx: 400,
+        recvErrors: 7,
+      }),
+    );
+    expect(decoded.type).toBe(StatsTypes.Packets);
+    expect(decoded.data).toEqual({
+      recv: 1000,
+      sent: 900,
+      nSentFlood: 100,
+      nSentDirect: 200,
+      nRecvFlood: 300,
+      nRecvDirect: 400,
+      nRecvErrors: 7,
+    });
   });
 
   it('Contact decodes back to the same key, name, path and position', async () => {
@@ -365,6 +428,12 @@ describe('meshcoreCompanionCodec — framing + command decode', () => {
     expect(parsed.code).toBe(CommandCodes.DeviceQuery);
     expect(parsed.appTargetVer).toBe(1);
   });
+
+  it('decodeCommand parses a GetStats sub-type', () => {
+    const parsed = decodeCommand(Buffer.from([CommandCodes.GetStats, StatsTypes.Radio]));
+    expect(parsed.code).toBe(CommandCodes.GetStats);
+    expect(parsed.statsType).toBe(StatsTypes.Radio);
+  });
 });
 
 // ─────────────── config-command parsers (issue #3904) ───────────────
@@ -403,6 +472,27 @@ describe('config-command parsers (#3904)', () => {
     const bytes = await buildCommandBytes((c) => c.sendCommandSetAdvertName('Node XYZ'));
     expect(bytes[0]).toBe(CommandCodes.SetAdvertName);
     expect(parseSetAdvertName(bytes)).toEqual({ name: 'Node XYZ' });
+  });
+
+  it('parses the favourite bit from meshcore.js AddUpdateContact output', async () => {
+    const publicKey = new Uint8Array(Buffer.from('c3'.repeat(32), 'hex'));
+    const bytes = await buildCommandBytes((c) => c.sendCommandAddUpdateContact(
+      publicKey,
+      Constants.AdvType.Chat,
+      0xa5,
+      0xff,
+      new Uint8Array(64),
+      'Favourite Contact',
+      1_750_000_000,
+      degreesToFixed(29.7604),
+      degreesToFixed(-95.3698),
+    ));
+    expect(bytes[0]).toBe(CommandCodes.AddUpdateContact);
+    expect(parseAddUpdateContactFavorite(bytes)).toEqual({
+      publicKey: 'c3'.repeat(32),
+      favorite: true,
+      flags: 0xa5,
+    });
   });
 
   it('accepts a bare SetAdvertName (no name bytes) as an empty "clear name"', () => {
